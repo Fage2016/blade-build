@@ -271,18 +271,11 @@ The default value is `mid`.
 
 #### Enable DebugFission ####
 
-Use GCC's [DebugFission](https://gcc.gnu.org/wiki/DebugFission) function:
+For DebugFission configuration details, please refer to:
+- [`cc_config.fission`](config.md#cc_config) - Enable DebugFission feature
+- [`cc_config.dwp`](config.md#cc_config) - Package dwo files into dwp files
+- [Using dwp files in package](build_rules/cc.md#using-dwp-files) - How to include dwp files in deployment packages
 
-```python
-cc_config(
-     ...
-     append_cppflags = ['-gsplit-dwarf'],
-     append_linkflags = ['-fuse-ld=gold','-Wl,--gdb-index'],
-     ...
-)
-```
-
-In our real test, with the middle debug information level, the size of an executable file has been reduced from 1.9GB to 532MB.
 
 #### Compress debug information ####
 

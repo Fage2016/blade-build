@@ -261,18 +261,12 @@ global_config(
 
 #### 开启 DebugFission ####
 
-使用 GCC 的 [DebugFission](https://gcc.gnu.org/wiki/DebugFission) 功能：
+关于 DebugFission 的配置说明，请参考：
+- [`cc_config.fission`](config.md#cc_config) - 开启 DebugFission 功能
+- [`cc_config.dwp`](config.md#cc_config) - 打包 dwo 文件为 dwp 文件
+- [在 package 中使用 dwp 文件](build_rules/cc.md#使用-dwp-文件) - 如何在部署包中包含 dwp 文件
 
-```python
-cc_config(
-    ...
-    append_cppflags = ['-gsplit-dwarf'],
-    append_linkflags = ['-fuse-ld=gold', '-Wl,--gdb-index'],
-    ...
-)
-```
 
-经实测，在中等调试符号级别下，能把一个被测可执行文件从 1.9GB 减小到 532MB。
 
 #### 压缩调试符号 ####
 
