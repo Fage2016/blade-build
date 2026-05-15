@@ -19,6 +19,7 @@ import hashlib
 import inspect
 import json
 import os
+import pickle  # re-exported; consumed via `blade.util.pickle` by external code
 import signal
 import subprocess
 import sys
