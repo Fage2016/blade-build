@@ -13,13 +13,14 @@ of all of the cc targets, like cc_library, cc_binary.
 
 
 import os
+import pickle
 import sys
 from string import Template
 from typing import Any
 
 from blade import build_manager
 from blade import build_rules
-from blade import config
+from blade import config  # lgtm[py/cyclic-import]
 from blade import inclusion_check
 from blade.blade_types import StrOrListOpt
 from blade.constants import HEAP_CHECK_VALUES
@@ -27,7 +28,6 @@ from blade.target import Target
 from blade.util import (
     mkdir_p,
     path_under_dir,
-    pickle,
     run_command,
     stable_unique,
     var_to_list,

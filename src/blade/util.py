@@ -19,7 +19,6 @@ import hashlib
 import inspect
 import json
 import os
-import pickle  # pylint: disable=unused-import
 import signal
 import subprocess
 import sys

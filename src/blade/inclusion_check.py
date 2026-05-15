@@ -7,10 +7,10 @@
 """C/C++ header file inclusion dependency declaration check."""
 
 import os
+import pickle
 
 from blade import console
 from blade import util
-from blade.util import pickle
 
 
 def find_libs_by_header(hdr, hdr_targets_map, hdr_dir_targets_map):
