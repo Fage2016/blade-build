@@ -65,18 +65,56 @@ function _full_real_path() {
     return 0
 }
 
+# Return 0 and echo the interpreter if "$1" is a single executable on PATH
+# whose `-V` reports Python >= 3.10. Return 1 otherwise (silently).
+# Multi-word values (e.g. "python -m coverage run ...") are intentionally
+# rejected so that the full-command form stays routed through the final
+# ${BLADE_PYTHON_INTERPRETER:-$python} fallback at the bottom of this
+# script rather than being executed with a bare `-V`.
+function _probe_python() {
+    local candidate="$1"
+    [ -n "$candidate" ] || return 1
+    # Single-word check: reject if the value contains whitespace.
+    case "$candidate" in
+        *[[:space:]]*) return 1 ;;
+    esac
+    command -v "$candidate" &> /dev/null || return 1
+
+    local ver major rest minor
+    ver=$("$candidate" -V 2>&1 | sed 's/Python //g')
+    major=${ver%%.*}
+    rest=${ver#*.}
+    minor=${rest%%.*}
+    [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+    if (( major > 3 )) || (( major == 3 && minor >= 10 )); then
+        echo "$candidate"
+        return 0
+    fi
+    return 1
+}
+
 # Check the python version at first, exit blade when python
-# version is under 2.7 (for python2) or under 3.6 (for python3).
+# version is under 3.10.
 function _check_python() {
+    # Honor BLADE_PYTHON_INTERPRETER when it names a single executable that
+    # already satisfies the version requirement. This lets users point blade
+    # at e.g. /opt/homebrew/bin/python3.12 without having to shadow the
+    # system python3 on PATH. Multi-word values (coverage wrappers etc.)
+    # silently fall through to auto-detection and are re-applied at the
+    # final `${BLADE_PYTHON_INTERPRETER:-$python}` invocation below.
+    local override
+    if override=$(_probe_python "${BLADE_PYTHON_INTERPRETER:-}"); then
+        echo "$override"
+        return 0
+    fi
+
     local python=""
     if command -v python3 &> /dev/null; then
         python="python3"
     elif command -v python &> /dev/null; then
         python="python"
-    elif command -v python2 &> /dev/null; then
-        python="python2"
     else
-        _fatal "Please install python 2.7+ or 3.6+ in your system"
+        _fatal "Please install python 3.10+ in your system"
     fi
 
     local python_ver
@@ -87,14 +125,12 @@ function _check_python() {
 
     if ! [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
         _info "Python version in your machine: $python_ver"
-        _fatal "Cannot parse python version, please install python 2.7+ or 3.6+"
+        _fatal "Cannot parse python version, please install python 3.10+"
     fi
 
-    if (( major < 2 )) \
-        || (( major == 2 && minor < 7 )) \
-        || (( major == 3 && minor < 6 )); then
+    if (( major < 3 )) || (( major == 3 && minor < 10 )); then
         _info "Python version in your machine: $python_ver"
-        _fatal "Please upgrade your python version to 2.7+ or 3.6+"
+        _fatal "Please upgrade your python version to 3.10+"
     fi
     echo "$python"
 }
@@ -113,7 +149,10 @@ if [[ -e $blade_dir/blade_init ]]; then
     source $blade_dir/blade_init
 fi
 
-python=$(_check_python)
+# Note: _fatal inside _check_python runs in a command-substitution
+# sub-shell, so its `exit 1` only terminates the sub-shell. Propagate
+# the failure explicitly here.
+python=$(_check_python) || exit 1
 
 # Check ninja
 if ! command -v ninja &> /dev/null; then

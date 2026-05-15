@@ -10,15 +10,14 @@ This is python targets module which generates python egg,
 python library, python binary, python test.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
 from blade import build_manager
 from blade import build_rules
+from blade.blade_types import StrOrListOpt
 from blade.target import Target
-from blade.util import var_to_list
+from blade.util import var_to_list, var_to_list_or_none
 
 
 class PythonTarget(Target):
@@ -27,19 +26,23 @@ class PythonTarget(Target):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 deps,
-                 base,
-                 visibility,
-                 tags,
-                 kwargs):
+                 name: str | None,
+                 type: str,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 base: str | None,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method."""
+        # Normalize BUILD-file-friendly StrOrList unions to list[str] once,
+        # right at the top; Target.__init__ below sees layer-2 shapes.
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
 
-        super(PythonTarget, self).__init__(
+        super().__init__(
             name=name,
             type=type,
             srcs=srcs,
@@ -58,7 +61,8 @@ class PythonTarget(Target):
 
     def _expand_deps_generation(self):
         build_targets = self.blade.get_build_targets()
-        for dep in self.expanded_deps:  # pylint: disable=not-an-iterable
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
+        for dep in self.expanded_deps:
             d = build_targets[dep]
             d.attr['generate_python'] = True
 
@@ -76,15 +80,15 @@ class PythonLibrary(PythonTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 base,
-                 visibility,
-                 tags,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 base: str | None,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method."""
-        super(PythonLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type='py_library',
                 srcs=srcs,
@@ -111,15 +115,15 @@ class PythonLibrary(PythonTarget):
 
 class PrebuiltPythonLibrary(PythonTarget):
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 base,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 base: str | None,
+                 kwargs: dict[str, object]):
         """Init method."""
-        super(PrebuiltPythonLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type='prebuilt_py_library',
                 srcs=srcs,
@@ -142,14 +146,14 @@ class PrebuiltPythonLibrary(PythonTarget):
         self._add_target_file('pylib', self._source_file_path(self.srcs[0]))
 
 
-def py_library(name=None,
-               srcs=[],
-               deps=[],
-               visibility=None,
-               tags=[],
-               base=None,
-               prebuilt=None,
-               **kwargs):
+def py_library(name: str,
+               srcs: StrOrListOpt = None,
+               deps: StrOrListOpt = None,
+               visibility: StrOrListOpt = None,
+               tags: StrOrListOpt = None,
+               base: str | None = None,
+               prebuilt: bool = False,
+               **kwargs: object):
     """python library."""
     if prebuilt:
         target = PrebuiltPythonLibrary(
@@ -182,20 +186,20 @@ class PythonBinary(PythonLibrary):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 main,
-                 base,
-                 exclusions,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 main: str | None,
+                 base: str | None,
+                 exclusions: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method."""
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
 
-        super(PythonBinary, self).__init__(
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 deps=deps,
@@ -208,14 +212,13 @@ class PythonBinary(PythonLibrary):
         self.attr['run_in_shell'] = True
         if main:
             self.attr['main'] = main
+        elif len(srcs) == 1:
+            self.attr['main'] = srcs[0]
         else:
-            if len(srcs) == 1:
-                self.attr['main'] = srcs[0]
-            else:
-                self.error(
-                    'The entry file must be specified by the "main" '
-                    'argument if there are more than one srcs')
-        self.attr['exclusions'] = exclusions
+            self.error(
+                'The entry file must be specified by the "main" '
+                'argument if there are more than one srcs')
+        self.attr['exclusions'] = var_to_list(exclusions)
         self._add_tags('type:binary')
 
     def _get_entry(self):
@@ -230,7 +233,8 @@ class PythonBinary(PythonLibrary):
         pylib = self._pylib()
         inputs = [pylib] if pylib else []
         targets = self.blade.get_build_targets()
-        for key in self.expanded_deps:  # pylint: disable=not-an-iterable
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
+        for key in self.expanded_deps:
             dep = targets[key]
             pylib = dep._get_target_file('pylib')
             if pylib:
@@ -243,15 +247,15 @@ class PythonBinary(PythonLibrary):
         self._add_default_target_file('bin', output)
 
 
-def py_binary(name=None,
-              srcs=[],
-              deps=[],
-              visibility=None,
-              tags=[],
-              main=None,
-              base=None,
-              exclusions=[],
-              **kwargs):
+def py_binary(name: str,
+              srcs: StrOrListOpt = None,
+              deps: StrOrListOpt = None,
+              visibility: StrOrListOpt = None,
+              tags: StrOrListOpt = None,
+              main: str | None = None,
+              base: str | None = None,
+              exclusions: StrOrListOpt = None,
+              **kwargs: object):
     """python binary."""
     target = PythonBinary(
             name=name,
@@ -275,17 +279,17 @@ class PythonTest(PythonBinary):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 main,
-                 base,
-                 testdata,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 main: str | None,
+                 base: str | None,
+                 testdata: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method."""
-        super(PythonTest, self).__init__(
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 deps=deps,
@@ -296,19 +300,19 @@ class PythonTest(PythonBinary):
                 exclusions=[],
                 kwargs=kwargs)
         self.type = 'py_test'
-        self.attr['testdata'] = testdata
+        self.attr['testdata'] = var_to_list(testdata)
         self._add_tags('type:test')
 
 
-def py_test(name=None,
-            srcs=[],
-            deps=[],
-            visibility=None,
-            tags=[],
-            main=None,
-            base=None,
-            testdata=[],
-            **kwargs):
+def py_test(name: str,
+            srcs: StrOrListOpt = None,
+            deps: StrOrListOpt = None,
+            visibility: StrOrListOpt = None,
+            tags: StrOrListOpt = None,
+            main: str | None = None,
+            base: str | None = None,
+            testdata: StrOrListOpt = None,
+            **kwargs: object):
     """python test."""
     target = PythonTest(
             name=name,

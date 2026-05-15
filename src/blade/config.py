@@ -10,8 +10,6 @@ This is the configuration parse module which parses
 the BLADE_ROOT as a configuration file.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import hashlib
 import os
@@ -22,7 +20,7 @@ import sys
 from blade import build_attributes
 from blade import console
 from blade import constants
-from blade.util import var_to_list, iteritems, eval_file, exec_file_content, source_location
+from blade.util import var_to_list, eval_file, exec_file_content, source_location
 
 
 _MAVEN_SNAPSHOT_UPDATE_POLICY_VALUES = ['always', 'daily', 'interval', 'never']
@@ -36,7 +34,7 @@ def config_rule(func):
     return func
 
 
-class BladeConfig(object):
+class BladeConfig:
     """BladeConfig. A configuration parser class."""
 
     def __init__(self):
@@ -53,7 +51,9 @@ class BladeConfig(object):
                 'duplicated_source_action': 'warning',
                 'duplicated_source_action__help__': "Can be 'warning', 'error', 'none'",
                 'test_timeout': 0,
-                'test_timeout__help__': 'In seconds',
+                'test_timeout__help__':
+                    'Per-test timeout in seconds. 0 (default) or any '
+                    'non-positive value means unlimited.',
                 'test_related_envs__help__':
                     'Environment variables which need to see whether changed before incremental '
                     'testing. regex is allowed',
@@ -200,6 +200,12 @@ class BladeConfig(object):
             'java_test_config': {
                 '__help__': 'Java Test Configuration',
                 'junit_libs': [],
+                'junit_libs__help__':
+                    'Labels of the JUnit runtime libraries to auto-inject '
+                    'into every java_test target (mirrors cc_test_config '
+                    'gtest_libs / scala_test_config scalatest_libs). Empty '
+                    'list means "no auto-injection"; each java_test must '
+                    'then list its JUnit runtime in `deps` explicitly.',
                 'jacoco_home': '',
             },
 
@@ -261,27 +267,20 @@ class BladeConfig(object):
                 'thrift_gen_params': 'cpp:include_prefix,pure_enums'
             },
 
-            'fbthrift_config': {
-                '__help__': 'Facebook Thrift Configuration',
-                'fbthrift1': 'thrift1',
-                'fbthrift2': 'thrift2',
-                'fbthrift_libs': [],
-                'fbthrift_incs': [],
-            },
         }
 
     def info(self, msg):
-        console.info('%s: info: %s' % (source_location(self.current_file_name), msg), prefix=False)
+        console.info(f'{source_location(self.current_file_name)}: info: {msg}', prefix=False)
 
     def warning(self, msg):
-        console.warning('%s: warning: %s' % (source_location(self.current_file_name), msg), prefix=False)
+        console.warning(f'{source_location(self.current_file_name)}: warning: {msg}', prefix=False)
 
     def error(self, msg):
-        console.error('%s: error: %s' % (source_location(self.current_file_name), msg), prefix=False)
+        console.error(f'{source_location(self.current_file_name)}: error: {msg}', prefix=False)
 
     def fatal(self, msg):
         # NOTE: VSCode's problem matcher doesn't recognize 'fatal', use 'error' instead
-        console.fatal('%s: error: %s' % (source_location(self.current_file_name), msg), prefix=False)
+        console.fatal(f'{source_location(self.current_file_name)}: error: {msg}', prefix=False)
 
     def try_parse_file(self, filename):
         """load the configuration file and parse."""
@@ -322,10 +321,10 @@ class BladeConfig(object):
                 if isinstance(section[k], list):
                     section[k] += var_to_list(append[k])
                 else:
-                    self.warning('%s: Config item %s is not a list' % (section_name, k))
+                    self.warning(f'{section_name}: Config item {k} is not a list')
 
             else:
-                self.warning('%s: Unknown config item name: %s' % (section_name, k))
+                self.warning(f'{section_name}: Unknown config item name: {k}')
 
     def _replace_config(self, section_name, section, user_config):
         """Replace config section items"""
@@ -343,7 +342,7 @@ class BladeConfig(object):
                 if item_name in section:
                     self._prepend_item_value(section, name, item_name, value, user_config)
                     continue
-            msg = '%s: Unknown config item name: "%s"' % (section_name, name)
+            msg = f'{section_name}: Unknown config item name: "{name}"'
             other_section = self.suggest_other_section(name)
             if other_section:
                 msg += ', maybe it is in "%s"?' % other_section
@@ -359,30 +358,29 @@ class BladeConfig(object):
         elif isinstance(value, type(section[name])):
             section[name] = value
         else:
-            self.error('Incorrect type for "%s", expect "%s", actual "%s"' % (
-                name, type(section[name]).__name__, type(value).__name__))
+            self.error(f'Incorrect type for "{name}", expect "{type(section[name]).__name__}", actual "{type(value).__name__}"')
 
     def _append_item_value(self, section, name, item_name, value, user_config):
         """Append value to config item."""
         if item_name in user_config:
-            self.error('"%s" and "%s" can not be used together' % (name, item_name))
+            self.error(f'"{name}" and "{item_name}" can not be used together')
             return
         if isinstance(section[item_name], list):
             section[item_name] += var_to_list(value)
         elif isinstance(section[item_name], set):
             section[item_name].update(var_to_list(value))
         else:
-            self.warning('Invalid "%s", "%s" is not appendable' % (name, item_name))
+            self.warning(f'Invalid "{name}", "{item_name}" is not appendable')
 
     def _prepend_item_value(self, section, name, item_name, value, user_config):
         """Prepend value to config item."""
         if item_name in user_config:
-            self.error('"%s" and "%s" can not be used together' % (name, item_name))
+            self.error(f'"{name}" and "{item_name}" can not be used together')
             return
         if isinstance(section[item_name], list):
             section[item_name] = var_to_list(value) + section[item_name]
         else:
-            self.warning('Invalid "%s", "%s" is not prependable' % (name, item_name))
+            self.warning(f'Invalid "{name}", "{item_name}" is not prependable')
 
     def suggest_other_section(self, name):
         """Suggest possible section for item name"""
@@ -407,7 +405,7 @@ class BladeConfig(object):
     def dump(self, output_file_name):
         with open(output_file_name, 'w') as f:
             print('# This config file was generated by `blade dump --config --to-file=<FILENAME>`\n', file=f)
-            for name, value in sorted(iteritems(self.configs)):
+            for name, value in sorted(self.configs.items()):
                 self._dump_section(name, value, f)
 
     def _dump_section(self, name, values, f):
@@ -421,7 +419,7 @@ class BladeConfig(object):
             help = k + '__help__'
             if help in values:
                 print('    # %s' % values[help], file=f)
-            print('    %s = %s,' % (k, pprint.pformat(v, indent=8)), file=f)
+            print(f'    {k} = {pprint.pformat(v, indent=8)},', file=f)
         print(')\n', file=f)
 
 
@@ -459,8 +457,7 @@ def get_item(section_name, item_name):
 def _check_kwarg_enum_value(kwargs, name, valid_values):
     value = kwargs.get(name)
     if value is not None and value not in valid_values:
-        _blade_config.error('Invalid config item "%s" value "%s", can only be in %s' % (
-            name, value, valid_values))
+        _blade_config.error(f'Invalid config item "{name}" value "{value}", can only be in {valid_values}')
 
 
 def _check_test_related_envs(kwargs):
@@ -469,7 +466,7 @@ def _check_test_related_envs(kwargs):
             re.compile(name)
         except re.error as e:
             _blade_config.error(
-                '"global_config.test_related_envs": Invalid env name or regex "%s", %s' % (name, e))
+                f'"global_config.test_related_envs": Invalid env name or regex "{name}", {e}')
 
 
 def _check_default_visibility(kwargs):
@@ -627,5 +624,11 @@ def thrift_library_config(append=None, **kwargs):
 
 @config_rule
 def fbthrift_library_config(append=None, **kwargs):
-    """fbthrift config."""
-    _blade_config.update_config('fbthrift_config', append, kwargs)
+    """fbthrift config (deprecated)."""
+    # fbthrift_library was removed in v3. This stub exists so that
+    # BLADE_ROOT files referencing fbthrift_library_config don't
+    # cause a NameError during config parsing. All arguments are
+    # silently ignored.
+    pass
+
+

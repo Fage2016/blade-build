@@ -8,8 +8,6 @@
 Define proto_library target.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import re
@@ -19,11 +17,12 @@ from blade import build_rules
 from blade import config
 from blade import console
 from blade import java_targets
+from blade.blade_types import StrOrListOpt
 from blade.cc_targets import CcTarget
-from blade.util import var_to_list, iteritems
+from blade.util import var_to_list, var_to_list_or_none
 
 
-class ProtocPlugin(object):
+class ProtocPlugin:
     """A helper class for protoc plugin.
 
     Currently blade only supports protoc plugin which generates
@@ -36,14 +35,14 @@ class ProtocPlugin(object):
     __languages = ['cpp', 'java', 'python']
 
     def __init__(self,
-                 name,
-                 path,
-                 code_generation):
+                 name: str,
+                 path: str,
+                 code_generation: dict[str, dict[str, StrOrListOpt]]):
         self.name = name
         self.path = path
         assert isinstance(code_generation, dict)
         self.code_generation = {}
-        for language, v in iteritems(code_generation):
+        for language, v in code_generation.items():
             if language not in self.__languages:
                 console.error('%s: Language %s is invalid. '
                               'Protoc plugins in %s are supported by blade currently.' % (
@@ -61,10 +60,9 @@ class ProtocPlugin(object):
             self.code_generation[language]['deps'] = deps
 
     def protoc_plugin_flag(self, out, plugin_opts):
-        flag_value = '--plugin=protoc-gen-%s=%s --%s_out=%s' % (
-            self.name, self.path, self.name, out)
+        flag_value = f'--plugin=protoc-gen-{self.name}={self.path} --{self.name}_out={out}'
         for opt in plugin_opts:
-            flag_value += ' --%s_opt=%s' % (self.name, opt)
+            flag_value += f' --{self.name}_opt={opt}'
         return flag_value
 
     def __repr__(self):
@@ -79,30 +77,37 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 optimize,
-                 deprecated,
-                 generate_descriptors,
-                 target_languages,
-                 plugins,
-                 source_encoding,
-                 cpp_outs,
-                 plugin_opts,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 optimize: StrOrListOpt,
+                 deprecated: bool,
+                 generate_descriptors: bool,
+                 target_languages: StrOrListOpt,
+                 plugins: StrOrListOpt,
+                 source_encoding: str,
+                 cpp_outs: StrOrListOpt,
+                 plugin_opts: dict[str, list[str]] | None,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the proto target.
 
         """
         # pylint: disable=too-many-locals
+        # Normalize BUILD-file-friendly StrOrList unions to list[str] once
+        # for the CcTarget.__init__ forward; the rest of the body uses the
+        # normalized shapes.
         srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
+        optimize = var_to_list_or_none(optimize)
         proto_config = config.get_section('proto_library_config')
 
-        super(ProtoLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type='proto_library',
                 srcs=srcs,
@@ -152,7 +157,6 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
         self.attr['source_encoding'] = source_encoding
         self.attr['generate_descriptors'] = generate_descriptors
 
-        # TODO(chen3feng): Change the values to a `set` rather than separated attributes
         target_languages = var_to_list(target_languages)
         self.attr['target_languages'] = target_languages
         options = self.blade.get_options()
@@ -208,7 +212,7 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
                 continue
             p = protoc_plugin_config[plugin]
             protoc_plugins.append(p)
-            for language, v in iteritems(p.code_generation):
+            for language, v in p.code_generation.items():
                 for key in v['deps']:
                     if key not in self.deps:
                         self.deps.append(key)
@@ -232,7 +236,7 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
             input = self._source_file_path(src)
             package_dir, java_name = self._proto_java_gen_file(src)
             self.src_java_info[src] = (package_dir, java_name)
-            self.attr["generated_java_sources"].append("%s__%s__%s" % (input, package_dir, java_name))
+            self.attr["generated_java_sources"].append(f"{input}__{package_dir}__{java_name}")
 
     def _expand_deps_generation(self):
         if self.attr['generate_java']:
@@ -244,8 +248,8 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
         sources = []
         headers = []
         for cpp_out in self.attr['cpp_outs']:
-            sources.append(self._target_file_path('%s%s.cc' % (proto_name, cpp_out)))
-            headers.append(self._target_file_path('%s%s.h' % (proto_name, cpp_out)))
+            sources.append(self._target_file_path(f'{proto_name}{cpp_out}.cc'))
+            headers.append(self._target_file_path(f'{proto_name}{cpp_out}.h'))
         return (sources, headers)
 
     def _proto_gen_php_file(self, src):
@@ -302,8 +306,7 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
 
     def _proto_java_gen_file(self, src):
         """Generate the java files name of the proto library."""
-        # FIXME: Handle utf-8 file decode error in python3
-        with open(self._source_file_path(src)) as f:
+        with open(self._source_file_path(src), encoding='utf-8') as f:
             content = f.read()
         package_dir = self._get_java_package_name(content).replace('.', '/')
         class_name = self._proto_java_gen_class_name(src, content)
@@ -324,7 +327,7 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
         if cache_key in self.data:
             return self.data[cache_key][:]
         self_protos = self.attr.get('public_protos')
-        protos = self_protos[:] if len(self_protos) > 1 else []
+        protos = self_protos[:] if len(self_protos) > 1 else []  # pyright: ignore[reportArgumentType, reportOptionalSubscript]
         genrule_outputs = []
         for key in self.deps:
             dep = self.target_database[key]
@@ -424,8 +427,7 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
             if not package:
                 continue
             if not package.startswith(protobuf_go_path):
-                self.warning('go_package "%s" is not starting with "%s" in %s' % (
-                             package, protobuf_go_path, src))
+                self.warning(f'go_package "{package}" is not starting with "{protobuf_go_path}" in {src}')
             basename = os.path.basename(src)
             output = os.path.join(go_home, 'src', package, '%s.pb.go' % basename[:-6])
             self.generate_build('protogo', output, inputs=path)
@@ -454,8 +456,8 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
         sources = []
         headers = []
         for cpp_out in self.attr['cpp_outs']:
-            sources.append('%s%s.cc' % (base, cpp_out))
-            headers.append('%s%s.h' % (base, cpp_out))
+            sources.append(f'{base}{cpp_out}.cc')
+            headers.append(f'{base}{cpp_out}.h')
         return [sources, headers]
 
     def generate(self):
@@ -469,20 +471,20 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
 
 
 def proto_library(
-        name,
-        srcs=[],
-        deps=[],
-        visibility=None,
-        tags=[],
-        optimize=None,
-        deprecated=False,
-        generate_descriptors=False,
-        target_languages=None,
-        plugins=[],
-        source_encoding='iso-8859-1',
-        cpp_outs=[".pb"],
-        plugin_opts={},
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        optimize: StrOrListOpt = None,
+        deprecated: bool = False,
+        generate_descriptors: bool = False,
+        target_languages: StrOrListOpt = None,
+        plugins: StrOrListOpt = None,
+        source_encoding: str = 'iso-8859-1',
+        cpp_outs: StrOrListOpt = None,
+        plugin_opts: dict[str, list[str]] | None = None,
+        **kwargs: object):
     """proto_library target.
     Args:
         generate_descriptors (bool): Whether generate binary protobuf descriptors.
@@ -490,6 +492,8 @@ def proto_library(
             `java`, `python`, see protoc's `--xx_out`s.
             NOTE: The `cpp` target code is always generated.
     """
+    if cpp_outs is None:
+        cpp_outs = [".pb"]
     proto_library_target = ProtoLibrary(
             name=name,
             srcs=srcs,

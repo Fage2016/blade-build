@@ -8,32 +8,38 @@
 Define swig_library target.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
 from blade import build_manager
 from blade import build_rules
+from blade.blade_types import StrOrListOpt
 from blade.cc_targets import CcTarget
+from blade.util import var_to_list, var_to_list_or_none
 
 
 class SwigLibrary(CcTarget):
     """This class is used to build swig library."""
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 java_package,
-                 java_lib_packed,
-                 optimize,
-                 extra_swigflags,
-                 kwargs):
-        super(SwigLibrary, self).__init__(
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 java_package: str,
+                 java_lib_packed: bool,
+                 optimize: StrOrListOpt,
+                 extra_swigflags: StrOrListOpt,
+                 kwargs: dict[str, object]):
+        # Normalize before forwarding to CcTarget.__init__
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
+        optimize = var_to_list_or_none(optimize)
+        super().__init__(
                 name=name,
                 type='swig_library',
                 srcs=srcs,
@@ -52,12 +58,13 @@ class SwigLibrary(CcTarget):
         self.attr['cpperraswarn'] = warning
         self.attr['java_package'] = java_package
         self.attr['java_lib_packed'] = java_lib_packed
-        self.attr['extra_swigflags'] = extra_swigflags
+        self.attr['extra_swigflags'] = var_to_list(extra_swigflags)
         self._add_tags('lang:swig', 'type:library')
 
     def _expand_deps_generation(self):
         build_targets = self.blade.get_build_targets()
-        for dep in self.expanded_deps:  # pylint: disable=not-an-iterable
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
+        for dep in self.expanded_deps:
             d = build_targets[dep]
             if d.type == 'proto_library':
                 d.attr['generate_php'] = True
@@ -97,17 +104,17 @@ class SwigLibrary(CcTarget):
 
 
 def swig_library(
-        name,
-        srcs=[],
-        deps=[],
-        visibility=None,
-        tags=[],
-        warning='',
-        java_package='',
-        java_lib_packed=False,
-        optimize=None,
-        extra_swigflags=[],
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        warning: str = '',
+        java_package: str = '',
+        java_lib_packed: bool = False,
+        optimize: StrOrListOpt = None,
+        extra_swigflags: StrOrListOpt = None,
+        **kwargs: object):
     """swig_library target."""
     target = SwigLibrary(
             name=name,

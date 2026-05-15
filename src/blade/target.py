@@ -9,8 +9,6 @@
 This is the target module which is the super class of all of the targets.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import re
@@ -19,7 +17,7 @@ from blade import config
 from blade import console
 from blade import target_pattern
 from blade import target_tags
-from blade.util import var_to_list, iteritems, source_location, md5sum
+from blade.util import var_to_list, source_location, md5sum
 
 
 def _is_likely_concatenated_filenames(string, exts):
@@ -37,7 +35,7 @@ def _is_likely_concatenated_filenames(string, exts):
     """
     # Convert exts to regex, e.g., ['h', 'hpp'] to "(h|hpp)"
     ext_pattern = '(%s)' % '|'.join(e.replace('+', r'\+') for e in exts)
-    return re.search(r'\w+\.{ext}.+\.{ext}$'.format(ext=ext_pattern), string)
+    return re.search(rf'\w+\.{ext_pattern}.+\.{ext_pattern}$', string)
 
 
 # Target regex
@@ -71,8 +69,8 @@ def _parse_target(dep):
 
     For the sake of performance, there is a cache.
     """
-    if dep in _parse_target.cache:
-        return _parse_target.cache[dep]
+    if dep in _parse_target_cache:
+        return _parse_target_cache[dep]
     match = _TARGET_RE.match(dep)
     if not match:
         msg = 'format error'
@@ -91,14 +89,14 @@ def _parse_target(dep):
         if path:
             path = os.path.normpath(path)
         result = (path, name, None)
-    _parse_target.cache[dep] = result
+    _parse_target_cache[dep] = result
     return result
 
 
-_parse_target.cache = {}
+_parse_target_cache: dict[str, tuple] = {}
 
 
-class Target(object):
+class Target:
     """Abstract target class.
 
     This class should be derived by subclass like CcLibrary CcBinary
@@ -107,20 +105,42 @@ class Target(object):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 src_exts,
-                 deps,
-                 visibility,
-                 tags,
-                 kwargs,
-                 cmd=''):
+                 name: str | None,
+                 type: str,
+                 srcs: list[str],
+                 src_exts: list[str],
+                 deps: list[str],
+                 visibility: list[str] | None,
+                 tags: list[str],
+                 kwargs: dict[str, object],
+                 cmd: str = ''):
         """Init method.
 
         Init the target.
 
         """
+        # `name` is declared `str | None` to match the rule-entry convention
+        # (`def cc_library(name=None, ...):` and siblings); we validate it
+        # here so pyright can treat it as a non-empty string for the rest of
+        # the body. `console.fatal(...)` produces the canonical user-facing
+        # "Missing name" diagnostic and does not return.
+        if not name:
+            console.fatal('Missing "name"')
+        # Defensive normalization. The signature declares list[str], but some
+        # callers (rule-entry helpers that haven't been updated yet, plus any
+        # out-of-tree rule extensions) may still hand in raw str / None /
+        # tuple / set. Centralizing the coercion here means new call sites
+        # can freely pass None as "unset" without crashing downstream
+        # iterators. Candidate for removal in v4 once every rule-entry
+        # function has been audited.
+        srcs = var_to_list(srcs)
+        src_exts = var_to_list(src_exts)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        # Note: `visibility` stays as-is; _init_visibility already handles None
+        # and distinguishes it from an empty list (default visibility vs
+        # explicitly "visible to nobody").
+
         from blade import build_manager  # pylint: disable=import-outside-toplevel
         self.blade = build_manager.instance
         self.target_database = self.blade.get_target_database()
@@ -135,7 +155,7 @@ class Target(object):
         self.target_dir = os.path.normpath(os.path.join(self.build_dir, current_source_path))
 
         # The unique key of this target, for internal use mainly.
-        self.key = '%s:%s' % (current_source_path, name)
+        self.key = f'{current_source_path}:{name}'
         # The full qualified target id, to be displayed in diagnostic message
         self.fullname = '//' + self.key
         self.source_location = source_location(os.path.join(current_source_path, 'BUILD'))
@@ -143,17 +163,13 @@ class Target(object):
         self.deps = []
 
         # Expanded dependencies, includes direct and indirect dependies.
-        self.expanded_deps = []    # Provide type info then make lints happy(not-an-iterable).
-        self.expanded_deps = None  # Set to None to indicate not constructed.
+        self.expanded_deps: list[str] | None = None  # None means not expanded yet
 
         self.dependents = set()  # Target keys which depends on this
         self.expanded_dependents = set()  # Expanded target keys which depends on this
         self._implicit_deps = set()
         self._visibility = set()
         self._visibility_is_default = True
-
-        if not name:
-            self.fatal('Missing "name"')
 
         # Keep track of target filess generated by this target. Note that one target rule
         # may correspond to several target files, such as:
@@ -238,7 +254,7 @@ class Target(object):
         return self.__fingerprint
 
     def _format_message(self, level, msg):
-        return '%s: %s: %s: %s' % (self.source_location, level, self.name, msg)
+        return f'{self.source_location}: {level}: {self.name}: {msg}'
 
     def debug(self, msg):
         """Print message with target full name prefix"""
@@ -295,13 +311,13 @@ class Target(object):
             self.error('"%s" can not be empty' % (attr_name))
             return False
         if must_exist and not os.path.exists(os.path.join(self.path, path)):
-            self.error('Invalid path "%s" for "%s", does not exist' % (path, attr_name))
+            self.error(f'Invalid path "{path}" for "{attr_name}", does not exist')
             return False
         if '..' in path:
-            self.error('Invalid path "%s" for "%s". can not contains ".."' % (path, attr_name))
+            self.error(f'Invalid path "{path}" for "{attr_name}". can not contains ".."')
             return False
         if path.startswith('/'):
-            self.error('Invalid path "%s" for "%s". can not be absolute path' % (path, attr_name))
+            self.error(f'Invalid path "{path}" for "{attr_name}". can not be absolute path')
             return False
         return True
 
@@ -327,14 +343,14 @@ class Target(object):
             if ext:
                 ext = ext[1:]
             if ext not in exts:
-                self.error('Invalid %s file name: "%s", must ends with %s' % (file_kind, src, list(exts)))
+                self.error(f'Invalid {file_kind} file name: "{src}", must ends with {list(exts)}')
             full_path = self._source_file_path(src)
             if not os.path.exists(full_path):
                 if ext and _is_likely_concatenated_filenames(src, exts):
                     self.warning('File "%s" does not exist, missing "," between file names?' % src)
 
         if dups:
-            self.error('Duplicate %s file paths: %s ' % (file_kind, dups))
+            self.error(f'Duplicate {file_kind} file paths: {dups} ')
 
     # Keep the relationship of all src -> target.
     # Used by build rules to ensure that a source file occurs in
@@ -361,7 +377,7 @@ class Target(object):
                     elif target[1]:
                         pass
                     else:
-                        message = '"%s" is already in srcs of "%s"' % (src, target_existed[0])
+                        message = f'"{src}" is already in srcs of "{target_existed[0]}"'
                         if action == 'error':
                             self.error(message)
                         elif action == 'warning':
@@ -455,15 +471,14 @@ class Target(object):
         if path.startswith('//'):
             # Depend on library in remote directory
             path = path[2:]
+        elif path:
+            # Depend on library in relative subdirectory
+            path = os.path.join(self.path, path)
         else:
-            if path:
-                # Depend on library in relative subdirectory
-                path = os.path.join(self.path, path)
-            else:
-                # Depend on library in current directory
-                path = self.path
+            # Depend on library in current directory
+            path = self.path
 
-        return '%s:%s' % (path, name)
+        return f'{path}:{name}'
 
     def _init_target_deps(self, deps):
         """Init the target deps.
@@ -582,7 +597,6 @@ class Target(object):
         Returns:
             A tuple of (target jars, maven jars)
         """
-        # TODO(chen3feng): put to `data`
         return [], []
 
     def _target_dir(self):
@@ -660,15 +674,17 @@ class Target(object):
             return self.__targets.get(label, '')
         return self.__default_target
 
-    def _get_target_files(self, exclude_labels=[]):
+    def _get_target_files(self, exclude_labels=None):
         """
         Returns
         -----------
         All the target files built by the target itself
         """
+        if exclude_labels is None:
+            exclude_labels = ()
         self.get_build_code()  # Ensure rules were generated
         results = set()
-        for k, v in iteritems(self.__targets):
+        for k, v in self.__targets.items():
             if k in exclude_labels:
                 continue
             results.add(v)
@@ -696,6 +712,7 @@ class Target(object):
         Args:
             rule: the rule generated by certain target
         """
+        assert self.__build_code is not None, 'build code not initialized'
         self.__build_code.append('%s\n' % rule)
 
     def generate(self):
@@ -725,17 +742,17 @@ class Target(object):
         if order_only_deps:
             ins.append('||')
             ins += var_to_list(order_only_deps)
-        self._write_rule('build %s: %s %s' % (' '.join(outs), rule, ' '.join(ins)))
+        self._write_rule('build {}: {} {}'.format(' '.join(outs), rule, ' '.join(ins)))
         clean = (outputs + implicit_outputs) if clean is None else var_to_list(clean)
         if clean:
             self._remove_on_clean(*clean)
 
         if variables:
             assert isinstance(variables, dict)
-            for name, v in iteritems(variables):
+            for name, v in variables.items():
                 assert v is not None
                 if v:
-                    self._write_rule('  %s = %s' % (name, v))
+                    self._write_rule(f'  {name} = {v}')
                 else:
                     self._write_rule('  %s =' % name)
         self._write_rule('')  # An empty line to improve readability
@@ -758,7 +775,7 @@ class Target(object):
 
 class SystemLibrary(Target):
     def __init__(self, name):
-        super(SystemLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type='system_library',
                 srcs=[],

@@ -12,8 +12,6 @@
 This module executes the test programs.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import datetime
 import json
@@ -30,7 +28,7 @@ from blade import target_pattern
 from blade.test_scheduler import TestScheduler
 # pylint: disable=unused-import
 from blade.test_scheduler import TestRunResult  # Used by eval
-from blade.util import md5sum, iteritems
+from blade.util import md5sum
 
 
 # Used by eval when loading test history
@@ -81,7 +79,7 @@ class TestRunner(binary_runner.BinaryRunner):
             test_jobs_num:int, max number of concurrent test jobs
         """
         # pylint: disable=too-many-locals, too-many-statements
-        super(TestRunner, self).__init__(options, target_database, build_targets)
+        super().__init__(options, target_database, build_targets)
         self.__direct_targets = direct_targets
         self.__command_targets = command_targets
         self.__test_jobs_num = test_jobs_num
@@ -121,7 +119,7 @@ class TestRunner(binary_runner.BinaryRunner):
     def _update_test_history(self):
         old_env = self.test_history.get('env', {})
         env_keys = _filter_envs(os.environ.keys())
-        new_env = dict((key, os.environ[key]) for key in env_keys)
+        new_env = {key: os.environ[key] for key in env_keys}
         if old_env and new_env != old_env:
             console.notice('Some tests will be run due to test environments changed:')
             new, old = _diff_env(new_env, old_env)
@@ -131,7 +129,7 @@ class TestRunner(binary_runner.BinaryRunner):
                 console.notice('Old environments: %s' % old)
 
         self.test_history['env'] = new_env
-        self.env_md5 = md5sum(str(sorted(iteritems(new_env))))
+        self.env_md5 = md5sum(str(sorted(new_env.items())))
 
     def _save_test_history(self, passed_run_results, failed_run_results):
         """update test history and save it to file."""
@@ -170,7 +168,7 @@ class TestRunner(binary_runner.BinaryRunner):
 
     def _merge_passed_run_results_to_history(self, run_results):
         history_items = self.test_history['items']
-        for key, run_result in iteritems(run_results):
+        for key, run_result in run_results.items():
             old = history_items.get(key)
             if old and old.result.exit_code != 0:
                 self.repaired_tests.append(key)
@@ -182,7 +180,7 @@ class TestRunner(binary_runner.BinaryRunner):
 
     def _merge_failed_run_results_to_history(self, run_results):
         history_items = self.test_history['items']
-        for key, run_result in iteritems(run_results):
+        for key, run_result in run_results.items():
             old = history_items.get(key)
             if old:
                 first_fail_time = old.first_fail_time or run_result.start_time
@@ -231,8 +229,7 @@ class TestRunner(binary_runner.BinaryRunner):
                 data_target = data_target[2:]
                 data_target_path = os.path.abspath(data_target)
             else:
-                data_target_path = os.path.abspath('%s/%s' % (
-                                                   target.path, data_target))
+                data_target_path = os.path.abspath(f'{target.path}/{data_target}')
             if os.path.exists(data_target_path):
                 related_file_data_list.append(data_target_path)
 
@@ -315,11 +312,10 @@ class TestRunner(binary_runner.BinaryRunner):
                         testdata_md5=testdata_md5,
                         env_md5=self.env_md5,
                         args=self.options.args)
+            elif history.result.exit_code == 0:
+                self.unchanged_tests.append(target.key)
             else:
-                if history.result.exit_code == 0:
-                    self.unchanged_tests.append(target.key)
-                else:
-                    self.unrepaired_tests.append(target.key)
+                self.unrepaired_tests.append(target.key)
         self.unrepaired_tests.sort(key=lambda x: self.test_history['items'][x].first_fail_time,
                                    reverse=True)
 
@@ -348,14 +344,13 @@ class TestRunner(binary_runner.BinaryRunner):
     def _show_run_results(self, run_results, is_error=False):
         """Show the tests detail after scheduling them."""
         tests = []
-        for key, result in iteritems(run_results):
+        for key, result in run_results.items():
             reason = self.test_jobs[key].reason
             tests.append((key, result.cost_time, reason, result.exit_code))
         tests.sort(key=lambda x: x[1])
         output_function = console.error if is_error else console.info
         for key, costtime, reason, result in tests:
-            output_function('  %s triggered by %s, exit(%s), cost %.2f s' % (
-                            key, reason, result, costtime), prefix=False)
+            output_function(f'  {key} triggered by {reason}, exit({result}), cost {costtime:.2f} s', prefix=False)
 
     def _show_unrepaired_results(self):
         """Show the unrepaired tests"""
@@ -367,13 +362,12 @@ class TestRunner(binary_runner.BinaryRunner):
             test = items[key]
             first_fail_time = time.strftime('%F %T %A', time.localtime(test.first_fail_time))
             duration = datetime.timedelta(seconds=int(time.time() - test.first_fail_time))
-            console.error('  %s: exit(%s), retry %s times, since %s, duration %s' % (
-                key, test.result.exit_code, test.fail_count, first_fail_time, duration),
+            console.error(f'  {key}: exit({test.result.exit_code}), retry {test.fail_count} times, since {first_fail_time}, duration {duration}',
                 prefix=False)
         console.error('You can specify --run-unrepaired-tests to run them', prefix=False)
 
     def _collect_slow_tests(self, run_results):
-        return [(result.cost_time, key) for key, result in iteritems(run_results)
+        return [(result.cost_time, key) for key, result in run_results.items()
                 if result.cost_time > self.options.show_tests_slower_than]
 
     def _show_slow_tests(self, passed_run_results, failed_run_results):
@@ -382,7 +376,7 @@ class TestRunner(binary_runner.BinaryRunner):
         if slow_tests:
             console.warning('Found %d slow tests:' % len(slow_tests))
             for cost_time, key in sorted(slow_tests):
-                console.warning('  %.4gs\t//%s' % (cost_time, key), prefix=False)
+                console.warning(f'  {cost_time:.4g}s\t//{key}', prefix=False)
 
     def _show_tests_summary(self, passed_run_results, failed_run_results):
         """Show tests summary."""

@@ -8,18 +8,16 @@
 Implement scala_library, scala_fat_library and scala_test.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
 from blade import build_manager
 from blade import build_rules
 from blade import config
-from blade import console
+from blade.blade_types import StrOrListOpt
 from blade.java_targets import JavaTargetMixIn
 from blade.target import Target
-from blade.util import var_to_list
+from blade.util import var_to_list, var_to_list_or_none
 
 
 class ScalaTarget(Target, JavaTargetMixIn):
@@ -30,26 +28,30 @@ class ScalaTarget(Target, JavaTargetMixIn):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 resources,
-                 source_encoding,
-                 warnings,
-                 kwargs):
+                 name: str | None,
+                 type: str,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 resources: StrOrListOpt,
+                 source_encoding: str | None,
+                 warnings: str | None,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the scala target.
 
         """
+        # Normalize BUILD-file-friendly StrOrList unions to list[str] once,
+        # right at the top; Target.__init__ below sees layer-2 shapes.
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
         resources = var_to_list(resources)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
 
-        super(ScalaTarget, self).__init__(
+        super().__init__(
                 name=name,
                 type=type,
                 srcs=srcs,
@@ -59,6 +61,11 @@ class ScalaTarget(Target, JavaTargetMixIn):
                 tags=tags,
                 kwargs=kwargs)
         self._process_resources(resources)
+        # Pre-expand resource directories so that changes to files inside
+        # the directory are captured in the target's fingerprint.
+        if self.attr['resources']:
+            self.attr['expanded_resources'] = self._process_regular_resources(
+                self.attr['resources'])
         if source_encoding:
             self.attr['source_encoding'] = source_encoding
         if warnings:
@@ -121,22 +128,22 @@ class ScalaLibrary(ScalaTarget):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            exported_deps,
-            provided_deps,
-            coverage,
-            kwargs):
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: str | None,
+            exported_deps: StrOrListOpt,
+            provided_deps: StrOrListOpt,
+            coverage: bool,
+            kwargs: dict[str, object]):
         exported_deps = var_to_list(exported_deps)
         provided_deps = var_to_list(provided_deps)
         all_deps = var_to_list(deps) + exported_deps + provided_deps
-        super(ScalaLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type='scala_library',
                 srcs=srcs,
@@ -163,17 +170,17 @@ class ScalaFatLibrary(ScalaTarget):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            exclusions,
-            kwargs):
-        super(ScalaFatLibrary, self).__init__(
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: str | None,
+            exclusions: StrOrListOpt,
+            kwargs: dict[str, object]):
+        super().__init__(
                 name=name,
                 type='scala_fat_library',
                 srcs=srcs,
@@ -198,18 +205,18 @@ class ScalaTest(ScalaFatLibrary):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            exclusions,
-            testdata,
-            kwargs):
-        super(ScalaTest, self).__init__(
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: str | None,
+            exclusions: StrOrListOpt,
+            testdata: StrOrListOpt,
+            kwargs: dict[str, object]):
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 deps=deps,
@@ -227,11 +234,43 @@ class ScalaTest(ScalaFatLibrary):
         if not self.srcs:
             self.warning('Empty scala test sources.')
 
+        self._apply_scalatest_libs_from_config()
+
+    def _apply_scalatest_libs_from_config(self):
+        """Auto-inject the ScalaTest runtime declared by the workspace's
+        ``scala_test_config(scalatest_libs=[...])``.
+
+        Symmetric to ``JavaTest._apply_junit_libs_from_config`` in
+        ``java_targets.py``; the two hooks exist for the same reason
+        (turn a well-known config key into real implicit-deps
+        injection so BUILD files don't have to repeat the runtime
+        dep on every test target) and share the same three-branch
+        contract:
+
+        * ``scalatest_libs`` non-empty → forward the list as a whole
+          to ``Target._add_implicit_library``, which handles label
+          unification and dedup against the target's own ``deps``.
+        * ``scalatest_libs`` is ``[]`` or missing (``None``) → emit
+          one target-attributed warning pointing at the config key,
+          and make no implicit-library call. Workspaces that prefer
+          per-target explicit ``deps`` keep working, and users see
+          an actionable message for the misconfiguration case.
+
+        Kept as its own method, rather than inlined into ``__init__``,
+        so unit tests can cover all three branches without having to
+        construct a full ``ScalaTest`` instance against the build
+        manager, and so a future ``gtest_libs`` / similar helper has
+        an obvious template to copy.
+        """
         scalatest_libs = config.get_item('scala_test_config', 'scalatest_libs')
         if scalatest_libs:
             self._add_implicit_library(scalatest_libs)
         else:
-            console.warning('Config: "scala_test_config.scalatest_libs" is not configured')
+            self.warning(
+                'Config: "scala_test_config.scalatest_libs" is not configured; '
+                'scala_test targets must list their ScalaTest runtime in `deps` '
+                'explicitly. See `blade dump --config` for the current value.'
+            )
 
     def generate(self):
         if not self.srcs:
@@ -245,18 +284,18 @@ class ScalaTest(ScalaFatLibrary):
         self.generate_build('scalatest', output, inputs=[jar] + dep_jars + maven_jars, variables=vars)
 
 
-def scala_library(name=None,
-                  srcs=[],
-                  deps=[],
-                  resources=[],
-                  visibility=None,
-                  tags=[],
-                  source_encoding=None,
-                  warnings=None,
-                  exported_deps=[],
-                  provided_deps=[],
-                  coverage=True,
-                  **kwargs):
+def scala_library(name: str,
+                  srcs: StrOrListOpt = None,
+                  deps: StrOrListOpt = None,
+                  resources: StrOrListOpt = None,
+                  visibility: StrOrListOpt = None,
+                  tags: StrOrListOpt = None,
+                  source_encoding: str | None = None,
+                  warnings: str | None = None,
+                  exported_deps: StrOrListOpt = None,
+                  provided_deps: StrOrListOpt = None,
+                  coverage: bool = True,
+                  **kwargs: object):
     """Define scala_library target."""
     target = ScalaLibrary(
             name=name,
@@ -274,16 +313,16 @@ def scala_library(name=None,
     build_manager.instance.register_target(target)
 
 
-def scala_fat_library(name=None,
-                      srcs=[],
-                      deps=[],
-                      resources=[],
-                      visibility=None,
-                      tags=[],
-                      source_encoding=None,
-                      warnings=None,
-                      exclusions=[],
-                      **kwargs):
+def scala_fat_library(name: str,
+                      srcs: StrOrListOpt = None,
+                      deps: StrOrListOpt = None,
+                      resources: StrOrListOpt = None,
+                      visibility: StrOrListOpt = None,
+                      tags: StrOrListOpt = None,
+                      source_encoding: str | None = None,
+                      warnings: str | None = None,
+                      exclusions: StrOrListOpt = None,
+                      **kwargs: object):
     """Define scala_fat_library target."""
     target = ScalaFatLibrary(
             name=name,
@@ -299,17 +338,17 @@ def scala_fat_library(name=None,
     build_manager.instance.register_target(target)
 
 
-def scala_test(name=None,
-               srcs=None,
-               deps=[],
-               resources=[],
-               visibility=None,
-               tags=[],
-               source_encoding=None,
-               warnings=None,
-               exclusions=[],
-               testdata=[],
-               **kwargs):
+def scala_test(name: str,
+               srcs: StrOrListOpt = None,
+               deps: StrOrListOpt = None,
+               resources: StrOrListOpt = None,
+               visibility: StrOrListOpt = None,
+               tags: StrOrListOpt = None,
+               source_encoding: str | None = None,
+               warnings: str | None = None,
+               exclusions: StrOrListOpt = None,
+               testdata: StrOrListOpt = None,
+               **kwargs: object):
     """Build a scala test target
     Args:
         Most attributes are similar to java_test.

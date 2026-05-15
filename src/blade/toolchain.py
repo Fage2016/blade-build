@@ -9,8 +9,6 @@
 This module deals with the build toolchains.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import re
@@ -18,12 +16,12 @@ import subprocess
 import tempfile
 
 from blade import console
-from blade.util import var_to_list, iteritems, run_command
+from blade.util import var_to_list, run_command
 
 # example: Cuda compilation tools, release 11.0, V11.0.194
 _nvcc_version_re = re.compile(r'V(\d+\.\d+\.\d+)')
 
-class BuildArchitecture(object):
+class BuildArchitecture:
     """
     The BuildArchitecture class manages architecture/bits configuration
     across various platforms/compilers combined with the input from
@@ -73,7 +71,7 @@ class BuildArchitecture(object):
     def get_canonical_architecture(arch):
         """Get the canonical architecture from the specified arch."""
         canonical_arch = None
-        for k, v in iteritems(BuildArchitecture._build_architecture):
+        for k, v in BuildArchitecture._build_architecture.items():
             if arch == k or arch in v['alias']:
                 canonical_arch = k
                 break
@@ -105,7 +103,7 @@ class BuildArchitecture(object):
         return None
 
 
-class ToolChain(object):
+class ToolChain:
     """The build platform handles and gets the platform information."""
 
     def __init__(self):
@@ -114,12 +112,13 @@ class ToolChain(object):
         self.ld = self._get_cc_command('LD', 'g++')
         self.cc_version = self._get_cc_version()
         self.ar = self._get_cc_command('AR', 'ar')
+        self._cc_vendor = self._detect_cc_vendor()
 
     @staticmethod
     def _get_cc_command(env, default):
         """Get a cc command.
         """
-        return os.path.join(os.environ.get('TOOLCHAIN_DIR', ''), os.environ.get(env, default))
+        return os.path.join(os.environ.get('TOOLCHAIN_DIR', ''), os.environ.get(env, default))  # pyright: ignore[reportCallIssue, reportArgumentType]
 
     def _get_cc_version(self):
         version = ''
@@ -129,6 +128,36 @@ class ToolChain(object):
         if not version:
             console.fatal('Failed to obtain cc toolchain.')
         return version
+
+    def _detect_cc_vendor(self):
+        """Identify the cc vendor by querying the compiler itself.
+
+        Returns one of:
+          - 'clang'        : LLVM/Clang (including Apple Clang that masquerades as
+                             /usr/bin/gcc on macOS).
+          - 'gcc'          : Real GNU GCC.
+          - 'unknown'      : Detection failed. Callers treating a specific vendor
+                             as a precondition should take the conservative path.
+
+        Rationale: Relying on substring matching against the `cc` command name is
+        unreliable. On macOS `gcc` is typically an alias for Apple Clang, and
+        user-set CC/CXX may be an absolute path or a wrapper whose name reveals
+        nothing about the underlying vendor.
+        """
+        returncode, stdout, stderr = run_command([self.cc, '--version'])
+        if returncode != 0:
+            return 'unknown'
+        # `--version` output typically goes to stdout, but some wrappers emit on
+        # stderr. Concatenate both and lower-case for robust matching.
+        text = ((stdout or '') + '\n' + (stderr or '')).lower()
+        if 'clang' in text:
+            return 'clang'
+        # Match 'gcc ', '(gcc)', 'gnu c' etc., but only after we've ruled out
+        # clang (Apple Clang banner contains neither, upstream Clang shows
+        # 'clang version ...').
+        if 'gcc' in text or 'free software foundation' in text:
+            return 'gcc'
+        return 'unknown'
 
     @staticmethod
     def get_cc_target_arch():
@@ -152,8 +181,12 @@ class ToolChain(object):
         return self.ar
 
     def cc_is(self, vendor):
-        """Is cc is used for C/C++ compilation match vendor."""
-        return vendor in self.cc
+        """Return whether the detected cc vendor equals the given vendor.
+
+        The comparison is an exact match against the result of
+        `_detect_cc_vendor()` (one of 'clang', 'gcc', 'unknown').
+        """
+        return vendor == self._cc_vendor
 
     def filter_cc_flags(self, flag_list, language='c'):
         """Filter out the unrecognized compilation flags."""
@@ -200,7 +233,7 @@ class ToolChain(object):
                 valid_flags.append(flag)
 
         if unrecognized_flags:
-            console.warning('config: Unrecognized %s flags: %s' % (
+            console.warning('config: Unrecognized {} flags: {}'.format(
                     language, ', '.join(unrecognized_flags)))
 
         return valid_flags

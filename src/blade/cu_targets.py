@@ -10,8 +10,6 @@ This module defines cu_library, cu_binary and cu_test rules
 for cuda development.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
@@ -19,12 +17,15 @@ from blade import build_manager
 from blade import build_rules
 from blade import config
 from blade import console
+from blade.blade_types import StrOrListOpt
 from blade.cc_targets import CcTarget
-from blade.util import var_to_list
+from blade.util import var_to_list, var_to_list_or_none
 
 
 # See https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#supported-input-file-suffixes
-_SOURCE_FILE_EXTS = {'cu', 'c', 'cc', 'cxx', 'cpp', 'ptx'}
+# Tuple (not set) for the same reason as cc_targets._SOURCE_FILE_EXTS: used
+# only as the resolved default for CcTarget's `src_exts=` parameter.
+_SOURCE_FILE_EXTS: 'tuple[str, ...]' = ('cu', 'c', 'cc', 'cxx', 'cpp', 'ptx')
 
 
 class CuTarget(CcTarget):
@@ -34,27 +35,30 @@ class CuTarget(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 cuda_path,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 extra_cppflags,
-                 extra_cuflags,
-                 extra_linkflags,
-                 kwargs):
+                 name: str | None,
+                 type: str,
+                 srcs: list[str],
+                 cuda_path: str | None,
+                 deps: list[str],
+                 visibility: list[str] | None,
+                 tags: list[str],
+                 warning: str,
+                 defs: list[str],
+                 incs: list[str],
+                 extra_cppflags: list[str],
+                 extra_cuflags: list[str],
+                 extra_linkflags: list[str],
+                 kwargs: dict[str, object]):
+        # Defensive normalization: children normalize before passing to us,
+        # but keep the var_to_list calls for any callers that may still pass
+        # raw values (consistent with CcTarget's defensive pattern).
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
         extra_cppflags = var_to_list(extra_cppflags)
         extra_cuflags = var_to_list(extra_cuflags)
         extra_linkflags = var_to_list(extra_linkflags)
 
-        super(CuTarget, self).__init__(
+        super().__init__(
                 name=name,
                 type=type,
                 srcs=srcs,
@@ -70,10 +74,10 @@ class CuTarget(CcTarget):
                 extra_cppflags=extra_cppflags,
                 extra_linkflags=extra_linkflags,
                 kwargs=kwargs,
-                src_exts=_SOURCE_FILE_EXTS,
+                src_exts=list(_SOURCE_FILE_EXTS),
                 cmd='')
         self.cuda_path = self._get_cuda_path(cuda_path)
-        self.attr['extra_cuflags'] = extra_cuflags
+        self.attr['extra_cuflags'] = var_to_list(extra_cuflags)
         cmd = os.environ.get('NVCC')
         if self.cuda_path:
             cmd = os.path.join(self.cuda_path, 'bin/nvcc')
@@ -185,22 +189,33 @@ class CuLibrary(CuTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 hdrs,
-                 cuda_path,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 link_all_symbols,
-                 extra_cppflags,
-                 extra_cuflags,
-                 extra_linkflags,
-                 kwargs):
-        super(CuLibrary, self).__init__(
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 hdrs: StrOrListOpt,
+                 cuda_path: str | None,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 link_all_symbols: bool,
+                 extra_cppflags: StrOrListOpt,
+                 extra_cuflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 kwargs: dict[str, object]):
+        # Normalize BUILD-file-friendly StrOrList unions once, right at the
+        # top; CuTarget.__init__ below sees layer-2 list[str].
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_cuflags = var_to_list(extra_cuflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='cu_library',
                 srcs=srcs,
@@ -232,21 +247,21 @@ class CuLibrary(CuTarget):
             self._cuda_library(objs, inclusion_check_result)
 
 
-def cu_library(name=None,
-               srcs=[],
-               hdrs=None,
-               cuda_path=None,
-               deps=[],
-               visibility=None,
-               tags=[],
-               warning='yes',
-               defs=[],
-               incs=[],
-               link_all_symbols=False,
-               extra_cppflags=[],
-               extra_cuflags=[],
-               extra_linkflags=[],
-               **kwargs):
+def cu_library(name: str,
+               srcs: StrOrListOpt = None,
+               hdrs: StrOrListOpt = None,
+               cuda_path: str | None = None,
+               deps: StrOrListOpt = None,
+               visibility: StrOrListOpt = None,
+               tags: StrOrListOpt = None,
+               warning: str = 'yes',
+               defs: StrOrListOpt = None,
+               incs: StrOrListOpt = None,
+               link_all_symbols: bool = False,
+               extra_cppflags: StrOrListOpt = None,
+               extra_cuflags: StrOrListOpt = None,
+               extra_linkflags: StrOrListOpt = None,
+               **kwargs: object):
     target = CuLibrary(
             name,
             srcs=srcs,
@@ -276,20 +291,31 @@ class CuBinary(CuTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 cuda_path,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 extra_cppflags,
-                 extra_cuflags,
-                 extra_linkflags,
-                 kwargs):
-        super(CuBinary, self).__init__(
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 cuda_path: str | None,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 extra_cppflags: StrOrListOpt,
+                 extra_cuflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 kwargs: dict[str, object]):
+        # Normalize BUILD-file-friendly StrOrList unions once, right at the
+        # top; CuTarget.__init__ below sees layer-2 list[str].
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_cuflags = var_to_list(extra_cuflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='cu_binary',
                 srcs=srcs,
@@ -349,19 +375,19 @@ class CuBinary(CuTarget):
         self._write_inclusion_check_info()
 
 
-def cu_binary(name=None,
-              srcs=[],
-              cuda_path=None,
-              deps=[],
-              visibility=None,
-              tags=[],
-              warning='yes',
-              defs=[],
-              incs=[],
-              extra_cppflags=[],
-              extra_cuflags=[],
-              extra_linkflags=[],
-              **kwargs):
+def cu_binary(name: str,
+              srcs: StrOrListOpt = None,
+              cuda_path: str | None = None,
+              deps: StrOrListOpt = None,
+              visibility: StrOrListOpt = None,
+              tags: StrOrListOpt = None,
+              warning: str = 'yes',
+              defs: StrOrListOpt = None,
+              incs: StrOrListOpt = None,
+              extra_cppflags: StrOrListOpt = None,
+              extra_cuflags: StrOrListOpt = None,
+              extra_linkflags: StrOrListOpt = None,
+              **kwargs: object):
     target = CuBinary(
             name=name,
             srcs=srcs,
@@ -389,24 +415,35 @@ class CuTest(CuBinary):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 cuda_path,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 extra_cppflags,
-                 extra_cuflags,
-                 extra_linkflags,
-                 testdata,
-                 always_run,
-                 exclusive,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 cuda_path: str | None,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 extra_cppflags: StrOrListOpt,
+                 extra_cuflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 testdata: StrOrListOpt,
+                 always_run: bool,
+                 exclusive: bool,
+                 kwargs: dict[str, object]):
         # pylint: disable=too-many-locals
-        super(CuTest, self).__init__(
+        # Normalize BUILD-file-friendly StrOrList unions once, right at the
+        # top; CuTarget.__init__ below sees layer-2 list[str].
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_cuflags = var_to_list(extra_cuflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 cuda_path=cuda_path,
@@ -436,22 +473,22 @@ class CuTest(CuBinary):
 
 
 def cu_test(
-        name,
-        srcs=[],
-        cuda_path=None,
-        deps=[],
-        visibility=None,
-        tags=[],
-        warning='yes',
-        defs=[],
-        incs=[],
-        extra_cppflags=[],
-        extra_cuflags=[],
-        extra_linkflags=[],
-        testdata=[],
-        always_run=False,
-        exclusive=False,
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        cuda_path: str | None = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        warning: str = 'yes',
+        defs: StrOrListOpt = None,
+        incs: StrOrListOpt = None,
+        extra_cppflags: StrOrListOpt = None,
+        extra_cuflags: StrOrListOpt = None,
+        extra_linkflags: StrOrListOpt = None,
+        testdata: StrOrListOpt = None,
+        always_run: bool = False,
+        exclusive: bool = False,
+        **kwargs: object):
     target = CuTest(
             name=name,
             srcs=srcs,

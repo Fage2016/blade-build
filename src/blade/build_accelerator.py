@@ -8,11 +8,9 @@
 Build accelerator (ccache, distcc, etc.) manage module.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 
-class BuildAccelerator(object):
+class BuildAccelerator:
     """Describe a build accelerator."""
 
     def __init__(self, toolchain):

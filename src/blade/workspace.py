@@ -6,8 +6,6 @@
 
 """The workspace module represent current workspace."""
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import errno
 import json
@@ -51,8 +49,8 @@ def _generate_scm_git():
         revision = out.strip()
     out = git(['git', 'remote', '-v'])
     # $ git remote -v
-    # origin  https://github.com/chen3feng/blade-build.git (fetch)
-    # origin  https://github.com/chen3feng/blade-build.git (push)
+    # origin  https://github.com/blade-build/blade-build.git (fetch)
+    # origin  https://github.com/blade-build/blade-build.git (push)
     if out:
         url = out.splitlines()[0].split()[1]
         # Remove userinfo (such as username and password) from url, if any.
@@ -76,13 +74,13 @@ def _generate_scm(build_dir):
         }, f)
 
 
-class Workspace(object):
+class Workspace:
     """Workspace represent a dir tree rooted from the dir where the BLADE_ROOT residents."""
     def __init__(self, options):
         self.__options = options
         working_dir = util.get_cwd()
         self.__root_dir = self._find_root_dir(working_dir)
-        self.__working_dir = os.path.relpath(working_dir, self.__root_dir)
+        self.__working_dir = os.path.relpath(working_dir, self.__root_dir)  # pyright: ignore[reportCallIssue, reportArgumentType]
         self.__build_dir = ''
 
     def root_dir(self):
@@ -113,7 +111,7 @@ class Workspace(object):
             os.mkdir(build_dir)
         try:
             os.remove('blade-bin')
-        except os.error:
+        except OSError:
             pass
         os.symlink(os.path.abspath(build_dir), 'blade-bin')
 

@@ -62,8 +62,8 @@ def _convert_expression(expr, func_name):
         else:
             scope, names = token.split(':')
             names = names.split(',')
-            args = ', '.join(['"%s:%s"' % (scope, name) for name in names])
-            tokens.append('%s(%s)' % (func_name, args))
+            args = ', '.join([f'"{scope}:{name}"' for name in names])
+            tokens.append(f'{func_name}({args})')
     if stack:
         error = 'Unbalanced "(": "%s"' % expr[stack[-1][1]:]
         return None, error
@@ -78,19 +78,20 @@ def _compile_filter_expr(expr, match_func):
     try:
         code = compile(result, '--tags-filter', 'eval')
     except SyntaxError as e:
-        return None, "%s: %s" % (str(e), result)
+        return None, f"{e!s}: {result}"
     return code, error
 
 
 def compile_filter(expr):
     """Compile a filter expression into a filter function."""
-    def filter_function(target):
-        match_tags = target.match_tags
-        return eval(filter_function.code)  # pylint: disable=eval-used
     code, error = _compile_filter_expr(expr, 'match_tags')
     if not code:
         return None, error
-    filter_function.code = code
+
+    def filter_function(target, _code=code):
+        match_tags = target.match_tags
+        return eval(_code)  # pylint: disable=eval-used
+
     return filter_function, []
 
 

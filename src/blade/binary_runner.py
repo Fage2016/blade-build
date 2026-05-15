@@ -12,8 +12,6 @@
 This module executes a binary programs.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import shutil
@@ -25,7 +23,7 @@ from blade import console
 from blade.util import environ_add_path
 
 
-class BinaryRunner(object):
+class BinaryRunner:
     """BinaryRunner."""
 
     def __init__(self, options, target_database, build_targets):
@@ -64,7 +62,7 @@ class BinaryRunner(object):
             else:
                 long_path, short_path = item_norm, dest_norm
             if long_path.startswith(short_path) and long_path[len(short_path)] == '/':
-                target.error('"%s" could not exist with "%s" in testdata' % (dest, item))
+                target.error(f'"{dest}" could not exist with "{item}" in testdata')
 
     def _prepare_env(self, target):
         """Prepare the running environment."""

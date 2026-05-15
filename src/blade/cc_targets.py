@@ -11,16 +11,17 @@ This is the cc_target module which is the super class
 of all of the cc targets, like cc_library, cc_binary.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
+import sys
 from string import Template
+from typing import Any
 
 from blade import build_manager
 from blade import build_rules
 from blade import config
 from blade import inclusion_check
+from blade.blade_types import StrOrListOpt
 from blade.constants import HEAP_CHECK_VALUES
 from blade.target import Target
 from blade.util import (
@@ -35,7 +36,12 @@ from blade.version import LooseVersion as version_parse
 
 
 # See https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html#Overall-Options
-_SOURCE_FILE_EXTS = {'c', 'cc', 'cp', 'cxx', 'cpp', 'CPP', 'c++', 'C', 's', 'S', 'asm'}
+# _SOURCE_FILE_EXTS is a tuple (not a set) so it fits the Sequence[str] shape
+# callers expect; it is only ever consumed as the resolved default for the
+# `src_exts=` parameter, and ordering has no semantic effect.
+_SOURCE_FILE_EXTS: 'tuple[str, ...]' = ('c', 'cc', 'cp', 'cxx', 'cpp', 'CPP', 'c++', 'C', 's', 'S', 'asm')
+# _HEADER_FILE_EXTS stays a set because it is consumed by `in` membership
+# checks in :func:`is_header_file`, which benefit from O(1) lookup.
 _HEADER_FILE_EXTS = {'h', 'hh', 'H', 'hp', 'hpp', 'hxx', 'HPP', 'h++', 'inc', 'inl', 'tcc'}
 
 
@@ -85,18 +91,16 @@ def declare_hdr_dir(target, inc):
     _hdr_dir_targets_map[inc].add(target.key)
 
 
+_find_libs_by_header_cache: dict = {}
+
 def find_libs_by_header(hdr):
-    cache = find_libs_by_header.cache
-    result = cache.get(hdr)
+    result = _find_libs_by_header_cache.get(hdr)
     if result is not None:
         return result
     result = inclusion_check.find_libs_by_header(
                 hdr, _hdr_targets_map, _hdr_dir_targets_map)
-    cache[hdr] = result
+    _find_libs_by_header_cache[hdr] = result
     return result
-
-
-find_libs_by_header.cache = {}
 
 
 # dict(hdr, set(targets))
@@ -154,6 +158,16 @@ def need_dwp():
     return config.get_item('cc_config', 'dwp')
 
 
+def _cc_plugin_default_prefix_suffix() -> tuple[str, str]:
+    """Default (prefix, suffix) for cc_plugin output file names.
+
+    Currently fixed to ('lib', '.so') because blade only supports Linux as a
+    build target. When cross-platform support lands, derive these from the
+    active toolchain (macOS: ('lib', '.dylib'); Windows: ('', '.dll')).
+    """
+    return ('lib', '.so')
+
+
 class CcTarget(Target):
     """
     This class is derived from Target and it is the base class
@@ -161,36 +175,52 @@ class CcTarget(Target):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 export_incs,
-                 optimize,
-                 linkflags,
-                 extra_cppflags,
-                 extra_linkflags,
-                 kwargs,
-                 src_exts=_SOURCE_FILE_EXTS,
-                 cmd=''):
+                 name: str | None,
+                 type: str,
+                 srcs: list[str],
+                 deps: list[str],
+                 visibility: list[str] | None,
+                 tags: list[str],
+                 warning: str,
+                 defs: list[str],
+                 incs: list[str],
+                 export_incs: list[str],
+                 optimize: list[str] | None,
+                 linkflags: list[str] | None,
+                 extra_cppflags: list[str],
+                 extra_linkflags: list[str],
+                 kwargs: dict[str, object],
+                 src_exts: list[str] | None = None,
+                 cmd: str = ''):
         """Init method.
 
         Init the cc target.
 
         """
         # pylint: disable=too-many-locals
+        # Defensive normalization: entry points may pass None as default for
+        # these list-ish params (B006 fix). `optimize`/`linkflags` intentionally
+        # keep None-sentinel semantics and are handled via var_to_list_or_none.
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        export_incs = var_to_list(export_incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_linkflags = var_to_list(extra_linkflags)
         srcs = var_to_list(srcs)
         private_hdrs = [src for src in srcs if is_header_file(src)]
         srcs = [src for src in srcs if not is_header_file(src)]
         deps = var_to_list(deps)
         self.cmd = cmd
 
-        super(CcTarget, self).__init__(
+        # src_exts=None means "caller did not override" and we fall back to
+        # the cc source-extension set. Rule entries that deliberately want an
+        # empty extension list (e.g. resource_library, which synthesizes its
+        # own .c/.h) should pass src_exts=None explicitly; passing a real list
+        # overrides the default (see cu_targets.CuTarget).
+        if src_exts is None:
+            src_exts = list(_SOURCE_FILE_EXTS)
+
+        super().__init__(
                 name=name,
                 type=type,
                 srcs=srcs,
@@ -246,6 +276,9 @@ class CcTarget(Target):
         """Expand incs to full path"""
         result = []
         for inc in var_to_list(incs):
+            if '..' in inc.split(os.sep):
+                self.error('"incs" must not contain "..": %s' % inc)
+                continue
             if inc.startswith('//'):  # Full path
                 result.append(inc[2:])
             else:
@@ -275,8 +308,7 @@ class CcTarget(Target):
             if dep and dep.attr.get('deprecated'):
                 replaced_deps = dep.deps
                 if replaced_deps:
-                    self.warning('//%s is deprecated, please depends on //%s' % (
-                        dep, replaced_deps[0]))
+                    self.warning(f'//{dep} is deprecated, please depends on //{replaced_deps[0]}')
 
     __cxx_keyword_list = frozenset([
         'and', 'and_eq', 'alignas', 'alignof', 'asm', 'auto',
@@ -376,6 +408,7 @@ class CcTarget(Target):
 
     def _export_incs_list(self):
         inc_list = []
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for dep in self.expanded_deps:
             # system dep
             if dep[0] == '#':
@@ -435,10 +468,24 @@ class CcTarget(Target):
         return linkflags
 
     def _generate_link_all_symbols_link_flags(self, libs):
-        """Generate link flags for libraries which should be linked with all symbols."""
-        if libs:
-            return ['-Wl,--whole-archive'] + libs + ['-Wl,--no-whole-archive']
-        return []
+        """Generate link flags for libraries which should be linked with all symbols.
+
+        Platform-aware because the GNU ld spelling
+        ``-Wl,--whole-archive ... --no-whole-archive`` is rejected by Apple's
+        ld64 / ld-prime with ``ld: unknown option: --whole-archive``. macOS
+        uses Mach-O rather than ELF and has no GNU-ld port (Homebrew's
+        binutils formula explicitly doesn't install ``ld`` on Darwin), so
+        every Mac toolchain — Apple Clang, Homebrew GCC, Homebrew LLVM's
+        default driver — eventually hands off to ld64. Emit the Apple
+        equivalent ``-Wl,-force_load,<archive>`` once per archive on Darwin
+        instead; leave all other platforms (Linux with GNU ld / gold / lld /
+        mold, *BSD, etc.) on the original spelling.
+        """
+        if not libs:
+            return []
+        if sys.platform == 'darwin':
+            return ['-Wl,-force_load,' + lib for lib in libs]
+        return ['-Wl,--whole-archive'] + libs + ['-Wl,--no-whole-archive']
 
     def _dynamic_dependencies(self):
         """
@@ -448,6 +495,7 @@ class CcTarget(Target):
         targets = self.blade.get_build_targets()
         sys_libs, usr_libs = [], []
         incchk_deps = []
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for key in self.expanded_deps:
             dep = targets[key]
             if dep.path == '#':
@@ -476,6 +524,7 @@ class CcTarget(Target):
         targets = self.blade.get_build_targets()
         sys_libs, usr_libs, link_all_symbols_libs = [], [], []
         incchk_deps = []
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for key in self.expanded_deps:
             dep = targets[key]
             if dep.path == '#':
@@ -519,6 +568,7 @@ class CcTarget(Target):
         have been covered by the dependency file generated by gcc (the `.d` file) automatically.
         """
         result = set()
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for key in self.expanded_deps:
             dep = self.target_database[key]
             generated_hdrs = dep.attr.get('generated_hdrs')
@@ -645,7 +695,7 @@ class CcTarget(Target):
         if cmd:
             vars['cmd'] = cmd
         extra_linkflags = ['-l%s' % lib for lib in sys_libs]
-        extra_linkflags += self.attr.get('extra_linkflags')
+        extra_linkflags += self.attr.get('extra_linkflags')  # pyright: ignore[reportOperatorIssue]
         if implicit_deps is None:
             implicit_deps = []
         if linker_scripts:
@@ -708,7 +758,7 @@ class CcTarget(Target):
         # Therefore, it is empty at the beginning, but is available before the second build.
         # If it is written in the same file as the previous information, unnecessary repeated
         # builds will be triggered.
-        # See https://github.com/chen3feng/blade-build/issues/1034
+        # See https://github.com/blade-build/blade-build/issues/1034
         #
         # This information is only a subset of the global file `inclusion_declaration.data` and is
         # passed to the inclusion_check as an optimization to avoid reading the larger global file.
@@ -744,7 +794,7 @@ class CcTarget(Target):
 
     def _collect_declared_headers(self):
         """Collect direct headers declarations."""
-        declared_hdrs = set(full_hdr for hdr, full_hdr in self.attr['expanded_hdrs'])
+        declared_hdrs = {full_hdr for hdr, full_hdr in self.attr['expanded_hdrs']}
         declared_incs = set(self.attr.get('generated_incs', []))
 
         build_targets = self.blade.get_build_targets()
@@ -795,47 +845,61 @@ class CcLibrary(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 hdrs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 export_incs,
-                 optimize,
-                 always_optimize,
-                 link_all_symbols,
-                 binary_link_only,
-                 deprecated,
-                 linkflags,
-                 extra_cppflags,
-                 extra_linkflags,
-                 allow_undefined,
-                 secret,
-                 secret_revision_file,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 hdrs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 export_incs: StrOrListOpt,
+                 optimize: StrOrListOpt,
+                 always_optimize: bool,
+                 link_all_symbols: bool,
+                 binary_link_only: bool,
+                 deprecated: bool,
+                 linkflags: StrOrListOpt,
+                 extra_cppflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 allow_undefined: bool,
+                 secret: bool,
+                 secret_revision_file: str | None,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the cc library.
 
         """
         # pylint: disable=too-many-locals
-        super(CcLibrary, self).__init__(
+        # Normalize list-ish entry params to list[str] once so the forward to
+        # super() and the rest of the body can work on a uniform shape.
+        # `optimize` / `linkflags` / `visibility` keep None-sentinel semantics.
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        export_incs = var_to_list(export_incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        visibility_list = var_to_list_or_none(visibility)
+        optimize_list = var_to_list_or_none(optimize)
+        linkflags_list = var_to_list_or_none(linkflags)
+        super().__init__(
                 name=name,
                 type='cc_library',
                 srcs=srcs,
                 deps=deps,
-                visibility=visibility,
+                visibility=visibility_list,
                 tags=tags,
                 warning=warning,
                 defs=defs,
                 incs=incs,
                 export_incs=export_incs,
-                optimize=optimize,
-                linkflags=linkflags,
+                optimize=optimize_list,
+                linkflags=linkflags_list,
                 extra_cppflags=extra_cppflags,
                 extra_linkflags=extra_linkflags,
                 kwargs=kwargs)
@@ -874,20 +938,27 @@ class PrebuiltCcLibrary(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 deps,
-                 hdrs,
-                 visibility,
-                 tags,
-                 export_incs,
-                 libpath_pattern,
-                 link_all_symbols,
-                 binary_link_only,
-                 deprecated,
-                 kwargs):
+                 name: str | None,
+                 deps: 'StrOrListOpt',
+                 hdrs: 'StrOrListOpt',
+                 visibility: 'StrOrListOpt',
+                 tags: 'StrOrListOpt',
+                 export_incs: 'StrOrListOpt',
+                 libpath_pattern: str | None,
+                 link_all_symbols: bool,
+                 binary_link_only: bool,
+                 deprecated: bool,
+                 kwargs: dict[str, object]):
         """Init method."""
         # pylint: disable=too-many-locals
-        super(PrebuiltCcLibrary, self).__init__(
+        # Normalize the BUILD-file-friendly StrOrList unions once, right at
+        # the top; everything below (including CcTarget.__init__) sees the
+        # layer-2 `list[str]` / `list[str] | None` shape.
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        export_incs = var_to_list(export_incs)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='prebuilt_cc_library',
                 srcs=[],
@@ -925,7 +996,7 @@ class PrebuiltCcLibrary(CcTarget):
         has_dynamic = os.path.exists(dynamic_source)
 
         if not has_static and not has_dynamic:
-            self.error('Can not find either %s or %s' % (static_source, dynamic_source))
+            self.error(f'Can not find either {static_source} or {dynamic_source}')
             return
 
         if has_static:
@@ -970,7 +1041,7 @@ class PrebuiltCcLibrary(CcTarget):
 
         libpath = os.path.join(self.path, libpath)
 
-        return os.path.join(libpath, 'lib%s.%s' % (self.name, suffix))
+        return os.path.join(libpath, f'lib{self.name}.{suffix}')
 
     def _is_depended(self):
         """Does this library really be used"""
@@ -1016,17 +1087,17 @@ class PrebuiltCcLibrary(CcTarget):
 
 
 def prebuilt_cc_library(
-        name,
-        deps=[],
-        visibility=None,
-        tags=[],
-        export_incs=[],
-        hdrs=None,
-        libpath_pattern=None,
-        link_all_symbols=False,
-        binary_link_only=False,
-        deprecated=False,
-        **kwargs):
+        name: str,
+        deps: 'StrOrListOpt' = None,
+        visibility: 'StrOrListOpt' = None,
+        tags: 'StrOrListOpt' = None,
+        export_incs: 'StrOrListOpt' = None,
+        hdrs: 'StrOrListOpt' = None,
+        libpath_pattern: str | None = None,
+        link_all_symbols: bool = False,
+        binary_link_only: bool = False,
+        deprecated: bool = False,
+        **kwargs: object):
     """prebuilt_cc_library rule"""
     target = PrebuiltCcLibrary(
             name=name,
@@ -1045,32 +1116,32 @@ def prebuilt_cc_library(
 
 
 def cc_library(
-        name,
-        srcs=[],
-        hdrs=None,
-        deps=[],
-        visibility=None,
-        tags=[],
-        warning='yes',
-        defs=[],
-        incs=[],
-        export_incs=[],
-        optimize=None,
-        always_optimize=False,
-        pre_build=False,
-        prebuilt=False,
-        prebuilt_libpath_pattern=None,
-        link_all_symbols=False,
-        binary_link_only=False,
-        deprecated=False,
-        linkflags=None,
-        extra_cppflags=[],
-        extra_linkflags=[],
-        allow_undefined=False,
-        secret=False,
-        secret_revision_file=None,
-        secure=False,
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        hdrs: StrOrListOpt = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        warning: str = 'yes',
+        defs: StrOrListOpt = None,
+        incs: StrOrListOpt = None,
+        export_incs: StrOrListOpt = None,
+        optimize: StrOrListOpt = None,
+        always_optimize: bool = False,
+        pre_build: bool = False,
+        prebuilt: bool = False,
+        prebuilt_libpath_pattern: str | None = None,
+        link_all_symbols: bool = False,
+        binary_link_only: bool = False,
+        deprecated: bool = False,
+        linkflags: StrOrListOpt = None,
+        extra_cppflags: StrOrListOpt = None,
+        extra_linkflags: StrOrListOpt = None,
+        allow_undefined: bool = False,
+        secret: bool = False,
+        secret_revision_file: str | None = None,
+        secure: bool = False,
+        **kwargs: object):
     """cc_library target.
 
     Args:
@@ -1132,23 +1203,32 @@ class ForeignCcLibrary(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 deps,
-                 install_dir,
-                 hdrs,
-                 hdr_dir,
-                 visibility,
-                 tags,
-                 export_incs,
-                 lib_dir,
-                 has_dynamic,
-                 link_all_symbols,
-                 binary_link_only,
-                 deprecated,
-                 kwargs):
+                 name: str | None,
+                 deps: 'StrOrListOpt',
+                 install_dir: str,
+                 hdrs: 'StrOrListOpt',
+                 hdr_dir: str,
+                 visibility: 'StrOrListOpt',
+                 tags: 'StrOrListOpt',
+                 export_incs: 'StrOrListOpt',
+                 lib_dir: str,
+                 has_dynamic: bool,
+                 link_all_symbols: bool,
+                 binary_link_only: bool,
+                 deprecated: bool,
+                 kwargs: dict[str, object]):
         """Init method."""
         # pylint: disable=too-many-locals
-        super(ForeignCcLibrary, self).__init__(
+        # Normalize the BUILD-file-friendly StrOrList unions once, right at
+        # the top; everything below (including CcTarget.__init__ and the
+        # hdrs-branch further down) sees layer-2 `list[str]` /
+        # `list[str] | None`.
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        export_incs = var_to_list(export_incs)
+        hdrs = var_to_list(hdrs)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='foreign_cc_library',
                 srcs=[],
@@ -1172,7 +1252,7 @@ class ForeignCcLibrary(CcTarget):
         self._add_tags('lang:cc', 'type:library', 'type:foreign')
 
         if hdrs:
-            hdrs = [os.path.join(install_dir, h) for h in var_to_list(hdrs)]
+            hdrs = [os.path.join(install_dir, h) for h in hdrs]
             declare_hdrs(self, hdrs)
             hdrs = [self._target_file_path(os.path.join(install_dir, h)) for h in hdrs]
             self.attr['generated_hdrs'] = hdrs
@@ -1186,7 +1266,7 @@ class ForeignCcLibrary(CcTarget):
         """Return full path of the library file with specified type"""
         assert type in ('a', 'so')
         return self._target_file_path(os.path.join(self.attr['install_dir'], self.attr['lib_dir'],
-                                                   'lib%s.%s' % (self.name, type)))
+                                                   f'lib{self.name}.{type}'))
 
     def soname_and_full_path(self):
         """Return soname and full path of the shared library, if any"""
@@ -1218,20 +1298,20 @@ class ForeignCcLibrary(CcTarget):
 
 
 def foreign_cc_library(
-        name,
-        install_dir='',
-        lib_dir='lib',
-        hdrs=[],
-        hdr_dir='',
-        export_incs=[],
-        deps=[],
-        has_dynamic=False,
-        link_all_symbols=False,
-        binary_link_only=False,
-        visibility=None,
-        tags=[],
-        deprecated=False,
-        **kwargs):
+        name: str | None = None,
+        install_dir: str = '',
+        lib_dir: str = 'lib',
+        hdrs: 'StrOrListOpt' = None,
+        hdr_dir: str = '',
+        export_incs: 'StrOrListOpt' = None,
+        deps: 'StrOrListOpt' = None,
+        has_dynamic: bool = False,
+        link_all_symbols: bool = False,
+        binary_link_only: bool = False,
+        visibility: 'StrOrListOpt' = None,
+        tags: 'StrOrListOpt' = None,
+        deprecated: bool = False,
+        **kwargs: object):
     """Similar to a prebuilt cc_library, but it is built by a foreign build system,
     such as autotools, cmake, etc.
 
@@ -1273,50 +1353,65 @@ class CcBinary(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 embed_version,
-                 optimize,
-                 dynamic_link,
-                 linkflags,
-                 extra_cppflags,
-                 extra_linkflags,
-                 linker_scripts,
-                 version_scripts,
-                 export_dynamic,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 embed_version: bool,
+                 optimize: StrOrListOpt,
+                 dynamic_link: bool,
+                 linkflags: StrOrListOpt,
+                 extra_cppflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 linker_scripts: StrOrListOpt,
+                 version_scripts: StrOrListOpt,
+                 export_dynamic: bool,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the cc binary.
 
         """
         # pylint: disable=too-many-locals
-        super(CcBinary, self).__init__(
+        # Normalize list-ish entry params to list[str] once so the forward to
+        # super() and the rest of the body can work on a uniform shape.
+        # `optimize` / `linkflags` / `visibility` keep None-sentinel semantics.
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        linker_scripts = var_to_list(linker_scripts)
+        version_scripts = var_to_list(version_scripts)
+        visibility_list = var_to_list_or_none(visibility)
+        optimize_list = var_to_list_or_none(optimize)
+        linkflags_list = var_to_list_or_none(linkflags)
+        super().__init__(
                 name=name,
                 type='cc_binary',
                 srcs=srcs,
                 deps=deps,
-                visibility=visibility,
+                visibility=visibility_list,
                 tags=tags,
                 warning=warning,
                 defs=defs,
                 incs=incs,
                 export_incs=[],
-                optimize=optimize,
-                linkflags=linkflags,
+                optimize=optimize_list,
+                linkflags=linkflags_list,
                 extra_cppflags=extra_cppflags,
                 extra_linkflags=extra_linkflags,
                 kwargs=kwargs)
         self.attr['embed_version'] = embed_version
         self.attr['dynamic_link'] = dynamic_link
-        self.attr['lds_fullpath'] = self._fullpath_sources(var_to_list(linker_scripts))
-        self.attr['vers_fullpath'] = self._fullpath_sources(var_to_list(version_scripts))
+        self.attr['lds_fullpath'] = self._fullpath_sources(linker_scripts)
+        self.attr['vers_fullpath'] = self._fullpath_sources(version_scripts)
         self.attr['export_dynamic'] = export_dynamic
         self.attr['dwp'] = is_fission() and need_dwp()
         self._add_tags('lang:cc', 'type:binary')
@@ -1331,6 +1426,7 @@ class CcBinary(CcTarget):
     def _expand_deps_generation(self):
         if self.attr.get('dynamic_link'):
             build_targets = self.blade.get_build_targets()
+            assert self.expanded_deps is not None, 'expanded_deps not expanded'
             for dep in self.expanded_deps:
                 build_targets[dep].attr['generate_dynamic'] = True
 
@@ -1339,6 +1435,7 @@ class CcBinary(CcTarget):
         dynamic_link = self.attr['dynamic_link']
         build_targets = self.blade.get_build_targets()
         rpath_links = []
+        assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for lib in self.expanded_deps:
             if build_targets[lib].type == 'prebuilt_cc_library':
                 path = build_targets[lib]._rpath_link(dynamic_link)
@@ -1350,7 +1447,9 @@ class CcBinary(CcTarget):
     def _generate_cc_binary_link_flags(self, dynamic_link):
         linkflags = []
         toolchain = self.blade.get_build_toolchain()
-        if not dynamic_link and toolchain.cc_is('gcc') and version_parse(toolchain.get_cc_version()) > version_parse('4.5'):
+        if (not dynamic_link and toolchain.cc_is('gcc')
+                and version_parse(toolchain.get_cc_version()) > version_parse('4.5')
+                and sys.platform != 'darwin'):
             linkflags += ['-static-libgcc', '-static-libstdc++']
         if self.attr.get('export_dynamic'):
             linkflags.append('-rdynamic')
@@ -1419,24 +1518,24 @@ class CcBinary(CcTarget):
         self._cc_binary(objs, inclusion_check_result, self.attr['dynamic_link'])
 
 
-def cc_binary(name=None,
-              srcs=[],
-              deps=[],
-              visibility=None,
-              tags=[],
-              warning='yes',
-              defs=[],
-              incs=[],
-              embed_version=True,
-              optimize=None,
-              dynamic_link=False,
-              linkflags=None,
-              extra_cppflags=[],
-              extra_linkflags=[],
-              linker_scripts=[],
-              version_scripts=[],
-              export_dynamic=False,
-              **kwargs):
+def cc_binary(name: str,
+              srcs: StrOrListOpt = None,
+              deps: StrOrListOpt = None,
+              visibility: StrOrListOpt = None,
+              tags: StrOrListOpt = None,
+              warning: str = 'yes',
+              defs: StrOrListOpt = None,
+              incs: StrOrListOpt = None,
+              embed_version: bool = True,
+              optimize: StrOrListOpt = None,
+              dynamic_link: bool = False,
+              linkflags: StrOrListOpt = None,
+              extra_cppflags: StrOrListOpt = None,
+              extra_linkflags: StrOrListOpt = None,
+              linker_scripts: StrOrListOpt = None,
+              version_scripts: StrOrListOpt = None,
+              export_dynamic: bool = False,
+              **kwargs: object):
     """cc_binary target."""
     cc_binary_target = CcBinary(
             name=name,
@@ -1463,7 +1562,10 @@ def cc_binary(name=None,
 build_rules.register_function(cc_binary)
 
 
-def cc_benchmark(name=None, deps=[], **kwargs):
+def cc_benchmark(
+        name: str,
+        deps: StrOrListOpt = None,
+        **kwargs: Any):
     """cc_benchmark target."""
     cc_config = config.get_section('cc_config')
     benchmark_libs = cc_config['benchmark_libs']
@@ -1482,31 +1584,48 @@ class CcPlugin(CcTarget):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 optimize,
-                 prefix,
-                 suffix,
-                 linkflags,
-                 extra_cppflags,
-                 extra_linkflags,
-                 linker_scripts,
-                 version_scripts,
-                 allow_undefined,
-                 strip,
-                 kwargs):
+                 name: str,
+                 srcs: 'StrOrListOpt',
+                 deps: 'StrOrListOpt',
+                 visibility: 'StrOrListOpt',
+                 tags: 'StrOrListOpt',
+                 warning: str,
+                 defs: 'StrOrListOpt',
+                 incs: 'StrOrListOpt',
+                 optimize: 'StrOrListOpt',
+                 prefix: str | None,
+                 suffix: str | None,
+                 linkflags: 'StrOrListOpt',
+                 extra_cppflags: 'StrOrListOpt',
+                 extra_linkflags: 'StrOrListOpt',
+                 linker_scripts: 'StrOrListOpt',
+                 version_scripts: 'StrOrListOpt',
+                 allow_undefined: bool,
+                 strip: bool,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the cc plugin target.
 
         """
-        super(CcPlugin, self).__init__(
+        # Normalize the BUILD-file-friendly StrOrList unions once, right at
+        # the rule boundary, so everything downstream sees list[str].
+        # `visibility`, `optimize` and `linkflags` keep None-sentinel
+        # semantics and are handled via var_to_list_or_none to match
+        # CcTarget.__init__.
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        extra_cppflags = var_to_list(extra_cppflags)
+        extra_linkflags = var_to_list(extra_linkflags)
+        linker_scripts = var_to_list(linker_scripts)
+        version_scripts = var_to_list(version_scripts)
+        visibility = var_to_list_or_none(visibility)
+        optimize = var_to_list_or_none(optimize)
+        linkflags = var_to_list_or_none(linkflags)
+        super().__init__(
                   name=name,
                   type='cc_plugin',
                   srcs=srcs,
@@ -1522,12 +1641,27 @@ class CcPlugin(CcTarget):
                   extra_cppflags=extra_cppflags,
                   extra_linkflags=extra_linkflags,
                   kwargs=kwargs)
-        self.prefix = prefix
-        self.suffix = suffix
+        # Soft-deprecation: before this change, `cc_plugin(name='foo.so')` was
+        # the only way to override the 'lib%s.so' output basename (because
+        # prefix/suffix were silently ignored). Now that prefix/suffix are
+        # honored, a name ending in a shared-library extension is ambiguous:
+        # under the new rules it would produce e.g. 'libfoo.so.so'. Warn the
+        # user so they can switch to the documented `prefix=''` / `suffix=''`
+        # spelling instead.
+        if (name.endswith(('.so', '.dylib', '.dll'))
+                and prefix is None and suffix is None):
+            self.warning(
+                f"cc_plugin name='{name}' ends in a shared-library extension; "
+                "the historical auto-strip behavior has been removed. "
+                "Pass prefix='' and suffix='<ext>' explicitly, or rename the "
+                "target, to control the output file name."
+            )
+        self.attr['prefix'] = prefix
+        self.attr['suffix'] = suffix
         self.attr['allow_undefined'] = allow_undefined
         self.attr['strip'] = strip
-        self.attr['lds_fullpath'] = self._fullpath_sources(var_to_list(linker_scripts))
-        self.attr['vers_fullpath'] = self._fullpath_sources(var_to_list(version_scripts))
+        self.attr['lds_fullpath'] = self._fullpath_sources(linker_scripts)
+        self.attr['vers_fullpath'] = self._fullpath_sources(version_scripts)
         self._add_tags('lang:cc', 'type:plugin')
 
     def _before_generate(self):  # override
@@ -1543,10 +1677,14 @@ class CcPlugin(CcTarget):
         if link_all_symbols_libs:
             target_linkflags += self._generate_link_all_symbols_link_flags(link_all_symbols_libs)
 
-        if self.name.endswith('.so'):
-            output = self._target_file_path(self.name)
-        else:
-            output = self._target_file_path('lib%s.so' % self.name)
+        # Honor user-supplied prefix / suffix; fall back to the current
+        # toolchain defaults when either is left as None. See
+        # :func:`_cc_plugin_default_prefix_suffix` for the cross-platform
+        # defaults.
+        default_prefix, default_suffix = _cc_plugin_default_prefix_suffix()
+        prefix = default_prefix if self.attr['prefix'] is None else self.attr['prefix']
+        suffix = default_suffix if self.attr['suffix'] is None else self.attr['suffix']
+        output = self._target_file_path(f'{prefix}{self.name}{suffix}')
         if self.srcs or self.expanded_deps:
             if inclusion_check_result:
                 incchk_deps.append(inclusion_check_result)
@@ -1565,25 +1703,25 @@ class CcPlugin(CcTarget):
 
 
 def cc_plugin(
-        name,
-        srcs=[],
-        deps=[],
-        visibility=None,
-        tags=[],
-        warning='yes',
-        defs=[],
-        incs=[],
-        optimize=None,
-        prefix=None,
-        suffix=None,
-        linkflags=None,
-        extra_cppflags=[],
-        extra_linkflags=[],
-        linker_scripts=[],
-        version_scripts=[],
-        allow_undefined=True,
-        strip=False,
-        **kwargs):
+        name: str,
+        srcs: 'StrOrListOpt' = None,
+        deps: 'StrOrListOpt' = None,
+        visibility: 'StrOrListOpt' = None,
+        tags: 'StrOrListOpt' = None,
+        warning: str = 'yes',
+        defs: 'StrOrListOpt' = None,
+        incs: 'StrOrListOpt' = None,
+        optimize: 'StrOrListOpt' = None,
+        prefix: str | None = None,
+        suffix: str | None = None,
+        linkflags: 'StrOrListOpt' = None,
+        extra_cppflags: 'StrOrListOpt' = None,
+        extra_linkflags: 'StrOrListOpt' = None,
+        linker_scripts: 'StrOrListOpt' = None,
+        version_scripts: 'StrOrListOpt' = None,
+        allow_undefined: bool = True,
+        strip: bool = False,
+        **kwargs: object):
     """cc_plugin target."""
     target = CcPlugin(
             name=name,
@@ -1619,34 +1757,34 @@ class CcTest(CcBinary):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            warning,
-            defs,
-            incs,
-            embed_version,
-            optimize,
-            dynamic_link,
-            testdata,
-            linkflags,
-            extra_cppflags,
-            extra_linkflags,
-            export_dynamic,
-            always_run,
-            exclusive,
-            heap_check,
-            heap_check_debug,
-            kwargs):
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            warning: str,
+            defs: StrOrListOpt,
+            incs: StrOrListOpt,
+            embed_version: bool,
+            optimize: StrOrListOpt,
+            dynamic_link: bool | None,
+            testdata: StrOrListOpt,
+            linkflags: StrOrListOpt,
+            extra_cppflags: StrOrListOpt,
+            extra_linkflags: StrOrListOpt,
+            export_dynamic: bool,
+            always_run: bool,
+            exclusive: bool,
+            heap_check: str | None,
+            heap_check_debug: bool,
+            kwargs: dict[str, object]):
         """Init method."""
         # pylint: disable=too-many-locals
         cc_test_config = config.get_section('cc_test_config')
         if dynamic_link is None:
-            dynamic_link = cc_test_config['dynamic_link']
+            dynamic_link = bool(cc_test_config['dynamic_link'])
 
-        super(CcTest, self).__init__(
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 deps=deps,
@@ -1680,10 +1818,9 @@ class CcTest(CcBinary):
 
         if heap_check is None:
             heap_check = cc_test_config.get('heap_check', '')
-        else:
-            if heap_check not in HEAP_CHECK_VALUES:
-                self.error('heap_check can only be in %s' % HEAP_CHECK_VALUES)
-                heap_check = ''
+        elif heap_check not in HEAP_CHECK_VALUES:
+            self.error('heap_check can only be in %s' % HEAP_CHECK_VALUES)
+            heap_check = ''
 
         perftools_lib = var_to_list(cc_test_config['gperftools_libs'])
         perftools_debug_lib = var_to_list(cc_test_config['gperftools_debug_libs'])
@@ -1698,27 +1835,27 @@ class CcTest(CcBinary):
             self._add_implicit_library(perftools_lib_list)
 
 
-def cc_test(name=None,
-            srcs=[],
-            deps=[],
-            visibility=None,
-            tags=[],
-            warning='yes',
-            defs=[],
-            incs=[],
-            embed_version=False,
-            optimize=None,
-            dynamic_link=None,
-            testdata=[],
-            linkflags=None,
-            extra_cppflags=[],
-            extra_linkflags=[],
-            export_dynamic=False,
-            always_run=False,
-            exclusive=False,
-            heap_check=None,
-            heap_check_debug=False,
-            **kwargs):
+def cc_test(name: str,
+            srcs: StrOrListOpt = None,
+            deps: StrOrListOpt = None,
+            visibility: StrOrListOpt = None,
+            tags: StrOrListOpt = None,
+            warning: str = 'yes',
+            defs: StrOrListOpt = None,
+            incs: StrOrListOpt = None,
+            embed_version: bool = False,
+            optimize: StrOrListOpt = None,
+            dynamic_link: bool | None = None,
+            testdata: StrOrListOpt = None,
+            linkflags: StrOrListOpt = None,
+            extra_cppflags: StrOrListOpt = None,
+            extra_linkflags: StrOrListOpt = None,
+            export_dynamic: bool = False,
+            always_run: bool = False,
+            exclusive: bool = False,
+            heap_check: str | None = None,
+            heap_check_debug: bool = False,
+            **kwargs: object):
     """cc_test target."""
     # pylint: disable=too-many-locals
     cc_test_target = CcTest(

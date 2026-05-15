@@ -4,14 +4,17 @@
 # Author: CHEN Feng <phongchen@tencent.com>
 # Created: Jun 26, 2013
 
+# pyright: reportAttributeAccessIssue=false
+# JavaTargetMixIn methods access Target attributes (self.deps, self.attr,
+# self.warning, etc.) that pyright can't resolve because the mixin does
+# not inherit from Target. The attributes exist at runtime via MRO when
+# mixed into JavaTarget / ScalaTarget / ProtoLibrary.
 # pylint: disable=too-many-lines
 
 """
 Implement java_library, java_binary, java_test and java_fat_library.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import collections
 import os
@@ -21,21 +24,29 @@ from blade import build_manager
 from blade import build_rules
 from blade import config
 from blade import maven
+from blade.blade_types import StrOrListOpt
 from blade.target import Target, LOCATION_RE
-from blade.util import var_to_list
-from blade.util import iteritems
+from blade.util import var_to_list, var_to_list_or_none
 from blade.version import LooseVersion
 
 
 class MavenJar(Target):
     """Describe a maven jar"""
 
-    def __init__(self, name, id, classifier, transitive, visibility, tags):
-        super(MavenJar, self).__init__(
+    def __init__(self,
+                 name: str | None,
+                 id: str | None,
+                 classifier: str,
+                 transitive: bool,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt):
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='maven_jar',
                 srcs=[],
-                src_exts=None,
+                src_exts=[],
                 deps=[],
                 visibility=visibility,
                 tags=tags,
@@ -111,7 +122,7 @@ _JAVA_SRC_PATH_SEGMENTS = (
 )
 
 
-class JavaTargetMixIn(object):
+class JavaTargetMixIn:
     """
     This mixin includes common java methods
     """
@@ -312,7 +323,7 @@ class JavaTargetMixIn(object):
 
         maven_dep_ids = self._get_maven_dep_ids()
         jars = []
-        for (group, artifact), versions in iteritems(maven_jar_versions):
+        for (group, artifact), versions in maven_jar_versions.items():
             if len(versions) == 1:
                 picked_version = versions[0]
             else:
@@ -324,7 +335,7 @@ class JavaTargetMixIn(object):
                         break
                     if picked_version is None or LooseVersion(v) > LooseVersion(picked_version):
                         picked_version = v
-                self.debug('Maven dependency version conflict %s:%s:{%s} during %s. Use %s' % (
+                self.debug('Maven dependency version conflict {}:{}:{{{}}} during {}. Use {}'.format(
                     group, artifact, ', '.join(versions), scope, picked_version))
             jars += maven_jars[group, artifact, picked_version]
         return sorted(jars)
@@ -530,7 +541,8 @@ class JavaTargetMixIn(object):
             return []
         inputs, outputs = [], []
         resources_dir = self._target_file_path(self.name + '.resources')
-        resources = self._process_regular_resources(resources)
+        resources = self.attr.get('expanded_resources',
+            self._process_regular_resources(resources))
         for src, dst in resources:
             inputs.append(src)
             outputs.append(os.path.join(resources_dir, dst))
@@ -538,7 +550,7 @@ class JavaTargetMixIn(object):
         for key, type, dst in locations:
             path = targets[key]._get_target_file(type)
             if not path:
-                self.warning('Location %s %s is missing. Ignored.' % (key, type))
+                self.warning(f'Location {key} {type} is missing. Ignored.')
                 continue
             if not dst:
                 dst = os.path.basename(path)
@@ -610,26 +622,30 @@ class JavaTarget(Target, JavaTargetMixIn):
     """
 
     def __init__(self,
-                 name,
-                 type,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 resources,
-                 source_encoding,
-                 warnings,
-                 kwargs):
+                 name: str | None,
+                 type: str,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 resources: StrOrListOpt,
+                 source_encoding: str | None,
+                 warnings: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the java jar target.
 
         """
+        # Normalize BUILD-file-friendly StrOrList unions to list[str] once,
+        # right at the top; Target.__init__ below sees layer-2 shapes.
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
         resources = var_to_list(resources)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
 
-        super(JavaTarget, self).__init__(
+        super().__init__(
                 name=name,
                 type=type,
                 srcs=srcs,
@@ -639,6 +655,11 @@ class JavaTarget(Target, JavaTargetMixIn):
                 tags=tags,
                 kwargs=kwargs)
         self._process_resources(resources)
+        # Pre-expand resource directories so that changes to files inside
+        # the directory are captured in the target's fingerprint.
+        if self.attr['resources']:
+            self.attr['expanded_resources'] = self._process_regular_resources(
+                self.attr['resources'])
         self.attr['source_encoding'] = source_encoding
         self._add_tags('lang:java')
 
@@ -693,27 +714,27 @@ class JavaLibrary(JavaTarget):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            prebuilt,
-            binary_jar,
-            exported_deps,
-            provided_deps,
-            coverage,
-            kwargs):
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: StrOrListOpt,
+            prebuilt: bool,
+            binary_jar: str,
+            exported_deps: StrOrListOpt,
+            provided_deps: StrOrListOpt,
+            coverage: bool,
+            kwargs: dict[str, object]):
         type = 'java_library'
         if prebuilt:
             type = 'prebuilt_java_library'
         exported_deps = var_to_list(exported_deps)
         provided_deps = var_to_list(provided_deps)
         all_deps = var_to_list(deps) + exported_deps + provided_deps
-        super(JavaLibrary, self).__init__(
+        super().__init__(
                 name=name,
                 type=type,
                 srcs=srcs,
@@ -729,6 +750,7 @@ class JavaLibrary(JavaTarget):
         self._add_tags('type:library')
         if prebuilt:
             if not binary_jar:
+                assert name is not None  # name is validated by Target.__init__
                 binary_jar = name + '.jar'
             self.attr['binary_jar'] = self._source_file_path(binary_jar)
             self._add_tags('type:prebuilt')
@@ -749,18 +771,18 @@ class JavaBinary(JavaTarget):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            main_class,
-            exclusions,
-            kwargs):
-        super(JavaBinary, self).__init__(
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: StrOrListOpt,
+            main_class: str,
+            exclusions: StrOrListOpt,
+            kwargs: dict[str, object]):
+        super().__init__(
                 name=name,
                 type='java_binary',
                 srcs=srcs,
@@ -807,17 +829,17 @@ class JavaFatLibrary(JavaTarget):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            exclusions,
-            kwargs):
-        super(JavaFatLibrary, self).__init__(
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: StrOrListOpt,
+            exclusions: StrOrListOpt,
+            kwargs: dict[str, object]):
+        super().__init__(
                 name=name,
                 type='java_fat_library',
                 srcs=srcs,
@@ -842,20 +864,20 @@ class JavaTest(JavaBinary):
 
     def __init__(
             self,
-            name,
-            srcs,
-            deps,
-            visibility,
-            tags,
-            resources,
-            source_encoding,
-            warnings,
-            main_class,
-            exclusions,
-            testdata,
-            target_under_test,
-            kwargs):
-        super(JavaTest, self).__init__(
+            name: str | None,
+            srcs: StrOrListOpt,
+            deps: StrOrListOpt,
+            visibility: StrOrListOpt,
+            tags: StrOrListOpt,
+            resources: StrOrListOpt,
+            source_encoding: str | None,
+            warnings: StrOrListOpt,
+            main_class: str,
+            exclusions: StrOrListOpt,
+            testdata: StrOrListOpt,
+            target_under_test: str | None,
+            kwargs: dict[str, object]):
+        super().__init__(
                 name=name,
                 srcs=srcs,
                 deps=deps,
@@ -872,6 +894,37 @@ class JavaTest(JavaBinary):
         self.type = 'java_test'
         self.attr['testdata'] = var_to_list(testdata)
         self._add_tags('type:test')
+        self._apply_junit_libs_from_config()
+
+    def _apply_junit_libs_from_config(self):
+        """Auto-inject the JUnit runtime declared by the workspace's
+        ``java_test_config(junit_libs=[...])``.
+
+        This mirrors what cc_test does with ``cc_test_config.dynamic_link``
+        + gtest, and what scala_test does with
+        ``scala_test_config.scalatest_libs`` (see
+        ``ScalaTest._apply_scalatest_libs_from_config`` in
+        ``scala_targets.py``).
+
+        Until this hook was added, ``junit_libs`` was a well-known but
+        inert config key: accepted by the schema in config.py but
+        consumed nowhere, forcing every ``java_test`` BUILD file to
+        repeat the junit dep by hand.
+
+        Kept as its own method, rather than inlined into ``__init__``,
+        so unit tests can exercise the three branches (configured /
+        empty / missing) without having to construct a full
+        ``JavaTest`` instance against the build manager.
+        """
+        junit_libs = config.get_item('java_test_config', 'junit_libs')
+        if junit_libs:
+            self._add_implicit_library(junit_libs)
+        else:
+            self.warning(
+                'Config: "java_test_config.junit_libs" is not configured; '
+                'java_test targets must list their JUnit runtime in `deps` '
+                'explicitly. See `blade dump --config` for the current value.'
+            )
 
     def _java_test_vars(self):
         vars = {
@@ -891,25 +944,31 @@ class JavaTest(JavaBinary):
         self.generate_build('javatest', output, inputs=[jar] + dep_jars + maven_jars, variables=vars)
 
 
-def maven_jar(name=None, id=None, classifier='', transitive=True, visibility=None, tags=[]):
+def maven_jar(name: str | None = None,
+              id: str | None = None,
+              classifier: str = '',
+              transitive: bool = True,
+              visibility: StrOrListOpt = None,
+              tags: StrOrListOpt = None):
+    """Define a maven_jar target."""
     target = MavenJar(name, id, classifier, transitive, visibility, tags)
     build_manager.instance.register_target(target)
 
 
-def java_library(name=None,
-                 srcs=[],
-                 deps=[],
-                 visibility=None,
-                 tags=[],
-                 resources=[],
-                 source_encoding=None,
-                 warnings=None,
-                 prebuilt=False,
-                 binary_jar='',
-                 exported_deps=[],
-                 provided_deps=[],
-                 coverage=True,
-                 **kwargs):
+def java_library(name: str,
+                 srcs: StrOrListOpt = None,
+                 deps: StrOrListOpt = None,
+                 visibility: StrOrListOpt = None,
+                 tags: StrOrListOpt = None,
+                 resources: StrOrListOpt = None,
+                 source_encoding: str | None = None,
+                 warnings: StrOrListOpt = None,
+                 prebuilt: bool = False,
+                 binary_jar: str = '',
+                 exported_deps: StrOrListOpt = None,
+                 provided_deps: StrOrListOpt = None,
+                 coverage: bool = True,
+                 **kwargs: object):
     """Define java_library target.
 
     Args:
@@ -934,17 +993,17 @@ def java_library(name=None,
     build_manager.instance.register_target(target)
 
 
-def java_binary(name=None,
-                main_class='',
-                srcs=[],
-                deps=[],
-                visibility=None,
-                tags=[],
-                resources=[],
-                source_encoding=None,
-                warnings=None,
-                exclusions=[],
-                **kwargs):
+def java_binary(name: str,
+                main_class: str = '',
+                srcs: StrOrListOpt = None,
+                deps: StrOrListOpt = None,
+                visibility: StrOrListOpt = None,
+                tags: StrOrListOpt = None,
+                resources: StrOrListOpt = None,
+                source_encoding: str | None = None,
+                warnings: StrOrListOpt = None,
+                exclusions: StrOrListOpt = None,
+                **kwargs: object):
     """Define java_binary target."""
     target = JavaBinary(
             name=name,
@@ -961,19 +1020,19 @@ def java_binary(name=None,
     build_manager.instance.register_target(target)
 
 
-def java_test(name=None,
-              srcs=None,
-              deps=[],
-              visibility=None,
-              tags=[],
-              resources=[],
-              source_encoding=None,
-              warnings=None,
-              main_class='org.junit.runner.JUnitCore',
-              exclusions=[],
-              testdata=[],
-              target_under_test=None,
-              **kwargs):
+def java_test(name: str,
+              srcs: StrOrListOpt = None,
+              deps: StrOrListOpt = None,
+              visibility: StrOrListOpt = None,
+              tags: StrOrListOpt = None,
+              resources: StrOrListOpt = None,
+              source_encoding: str | None = None,
+              warnings: StrOrListOpt = None,
+              main_class: str = 'org.junit.runner.JUnitCore',
+              exclusions: StrOrListOpt = None,
+              testdata: StrOrListOpt = None,
+              target_under_test: str | None = None,
+              **kwargs: object):
     """Build a java test target"""
     target = JavaTest(
             name=name,
@@ -992,16 +1051,16 @@ def java_test(name=None,
     build_manager.instance.register_target(target)
 
 
-def java_fat_library(name=None,
-                     srcs=[],
-                     deps=[],
-                     visibility=None,
-                     tags=[],
-                     resources=[],
-                     source_encoding=None,
-                     warnings=None,
-                     exclusions=[],
-                     **kwargs):
+def java_fat_library(name: str,
+                     srcs: StrOrListOpt = None,
+                     deps: StrOrListOpt = None,
+                     visibility: StrOrListOpt = None,
+                     tags: StrOrListOpt = None,
+                     resources: StrOrListOpt = None,
+                     source_encoding: str | None = None,
+                     warnings: StrOrListOpt = None,
+                     exclusions: StrOrListOpt = None,
+                     **kwargs: object):
     """Define java_fat_library target."""
     target = JavaFatLibrary(
             name=name,

@@ -9,8 +9,6 @@
 This module use threads to run tests concurrently.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import signal
 import subprocess
@@ -19,10 +17,7 @@ import time
 import traceback
 from collections import namedtuple
 
-try:
-    import queue
-except ImportError:
-    import Queue as queue
+import queue
 
 from blade import config
 from blade import console
@@ -50,7 +45,7 @@ _SIGNAL_MAP = _signal_map()
 class WorkerThread(threading.Thread):
     def __init__(self, index, job_queue, job_handler, redirect):
         """Init methods for this thread."""
-        super(WorkerThread, self).__init__()
+        super().__init__()
         self.index = index
         self.running = True
         self.job_queue = job_queue
@@ -89,11 +84,17 @@ class WorkerThread(threading.Thread):
         This method simply checks job timeout and returns immediately.
         The caller should invoke this method repeatedly so that a job
         which takes a very long time would be timeout sooner or later.
+
+        A `job_timeout` of 0 (or any non-positive value) means *unlimited*,
+        matching the documented semantics of `global_config.test_timeout`.
+        Without this guard the expression `start_time + 0 < now` is true on
+        every tick after the first second, which would SIGTERM every running
+        test as soon as the scheduler's 1s polling loop wakes up.
         """
         try:
             self.job_lock.acquire()
             if (not self.job_is_timeout and self.job_start_time and
-                    self.job_timeout is not None and
+                    self.job_timeout is not None and self.job_timeout > 0 and
                     self.job_name and self.job_process is not None):
                 if self.job_start_time + self.job_timeout < now:
                     self.job_is_timeout = True
@@ -122,7 +123,7 @@ class WorkerThread(threading.Thread):
             traceback.print_exc()
 
 
-class TestScheduler(object):
+class TestScheduler:
     """Schedule specified tests to be ran in multiple test threads"""
 
     def __init__(self, tests_list, num_jobs):
@@ -150,15 +151,14 @@ class TestScheduler(object):
         result = 'SUCCESS'
         if returncode != 0:
             result = _SIGNAL_MAP.get(returncode, 'FAILED')
-            result = '%s:%s' % (result, returncode)
+            result = f'{result}:{returncode}'
         return result
 
     def _progress(self, done=0):
-        return '[%s/%s/%s]' % (self.num_of_finished_tests + done,
-                               self.num_of_running_tests - done, len(self.tests_list))
+        return f'[{self.num_of_finished_tests + done}/{self.num_of_running_tests - done}/{len(self.tests_list)}]'
 
     def _show_progress(self, cmd):
-        console.info('%s Start %s' % (self._progress(), cmd))
+        console.info(f'{self._progress()} Start {cmd}')
         if console.verbosity_le('quiet'):
             console.show_progress_bar(self.num_of_finished_tests, len(self.tests_list))
 
@@ -182,8 +182,7 @@ class TestScheduler(object):
         job_thread.set_job_data(p, test_name, timeout)
         stdout = p.communicate()[0]
         result = self._get_result(p.returncode)
-        msg = 'Output of //%s:\n%s%s Test //%s finished: %s\n' % (
-            test_name, stdout, self._progress(done=1), test_name, result)
+        msg = f'Output of //{test_name}:\n{stdout}{self._progress(done=1)} Test //{test_name} finished: {result}\n'
         if console.verbosity_le('quiet') and p.returncode != 0:
             console.error(msg, prefix=False)
         else:
@@ -205,7 +204,7 @@ class TestScheduler(object):
         job_thread.set_job_data(p, test_name, timeout)
         p.wait()
         result = self._get_result(p.returncode)
-        console.info('%s Test //%s finished : %s\n' % (self._progress(done=1), test_name, result))
+        console.info(f'{self._progress(done=1)} Test //{test_name} finished : {result}\n')
 
         return p.returncode
 
@@ -260,7 +259,13 @@ class TestScheduler(object):
                 dead_threads = []
                 for t in threads:
                     if t.is_alive():
-                        if test_timeout is not None:
+                        # 0 (or any non-positive value) means "unlimited",
+                        # matching the documented semantics of
+                        # global_config.test_timeout. The inner check in
+                        # check_job_timeout is also guarded, but skipping the
+                        # call here avoids touching the per-thread lock on
+                        # every tick when no timeout is configured.
+                        if test_timeout is not None and test_timeout > 0:
                             t.check_job_timeout(now)
                     else:
                         dead_threads.append(t)

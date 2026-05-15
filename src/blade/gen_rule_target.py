@@ -9,8 +9,6 @@
 Allow users defining their custom build rules.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
@@ -18,9 +16,10 @@ from blade import build_manager
 from blade import build_rules
 from blade import cc_targets
 from blade import console
+from blade.blade_types import StrOrListOpt
 from blade.target import Target, LOCATION_RE
 from blade.util import regular_variable_name
-from blade.util import var_to_list
+from blade.util import var_to_list, var_to_list_or_none
 
 
 # The rule template for gen_rule
@@ -35,32 +34,35 @@ class GenRuleTarget(Target):
     """General Rule Target"""
 
     def __init__(self,
-                 name,
-                 srcs,
-                 src_exts,
-                 deps,
-                 visibility,
-                 tags,
-                 outs,
-                 cmd,
-                 cmd_name,
-                 generated_hdrs,
-                 generated_incs,
-                 export_incs,
-                 cleans,
-                 heavy,
-                 exclude_dep_labels,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 src_exts: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 outs: StrOrListOpt,
+                 cmd: str,
+                 cmd_name: str,
+                 generated_hdrs: StrOrListOpt,
+                 generated_incs: StrOrListOpt,
+                 export_incs: StrOrListOpt,
+                 cleans: StrOrListOpt,
+                 heavy: bool,
+                 exclude_dep_labels: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method.
         Init the gen rule target.
         """
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
-        super(GenRuleTarget, self).__init__(
+        src_exts = var_to_list(src_exts) if src_exts is not None else None
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='gen_rule',
                 srcs=srcs,
-                src_exts=src_exts,
+                src_exts=src_exts if src_exts is not None else [],
                 deps=deps,
                 visibility=visibility,
                 tags=tags,
@@ -73,8 +75,11 @@ class GenRuleTarget(Target):
         outs = var_to_list(outs)
         # self._check_path_list(outs, "outs", must_exist=False)
         outs = [os.path.normpath(o) for o in outs]
+        for o in outs:
+            if '..' in o.split(os.sep):
+                self.error('"outs" must not contain "..": %s' % o)
 
-        self.attr['outs'] = outs
+        self.attr['outs'] = var_to_list(outs)
         self.attr['outputs'] = [self._target_file_path(o) for o in self.attr['outs']]
         self.attr['locations'] = []
         self.attr['cmd'] = LOCATION_RE.sub(self._process_location_reference, cmd)
@@ -135,7 +140,7 @@ class GenRuleTarget(Target):
             for key, label in locations:
                 path = targets[key]._get_target_file(label)
                 if not path:
-                    self.error('Invalid location reference %s %s' % (':'.join(key), label))
+                    self.error('Invalid location reference {} {}'.format(':'.join(key), label))
                     continue
                 locations_paths.append(path)
             cmd = cmd % tuple(locations_paths)
@@ -167,7 +172,7 @@ class GenRuleTarget(Target):
         # `build` statement, so any other build scoped variables are expanded to empty.
         rule = '%s__rule__' % regular_variable_name(self._source_file_path(self.name))
         cmd = self._expand_command()
-        description = console.colored('%s %s' % (self.attr['cmd_name'], self.fullname), 'dimpurple')
+        description = console.colored('{} {}'.format(self.attr['cmd_name'], self.fullname), 'dimpurple')
         self._write_rule(_RULE_FORMAT % (rule, cmd, self.blade.get_root_dir(), description))
 
         outputs = self.attr['outputs']
@@ -187,22 +192,22 @@ class GenRuleTarget(Target):
 
 
 def gen_rule(
-        name,
-        srcs=[],
-        src_exts=[],
-        deps=[],
-        visibility=None,
-        tags=[],
-        outs=[],
-        cmd='',
-        cmd_name='COMMAND',
-        generated_hdrs=None,
-        generated_incs=None,
-        export_incs=[],
-        cleans=[],
-        heavy=False,
-        exclude_dep_labels=["dwp"],
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        src_exts: StrOrListOpt = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        outs: StrOrListOpt = None,
+        cmd: str = '',
+        cmd_name: str = 'COMMAND',
+        generated_hdrs: StrOrListOpt = None,
+        generated_incs: StrOrListOpt = None,
+        export_incs: StrOrListOpt = None,
+        cleans: StrOrListOpt = None,
+        heavy: bool = False,
+        exclude_dep_labels: StrOrListOpt = None,
+        **kwargs: object):
     """General Build Rule
     Args:
         src_exts: List[str],
@@ -225,6 +230,8 @@ def gen_rule(
         heavy: bool, Whether this target is a heavy target, which means to build it will cost many
             cpu/memory.
     """
+    if exclude_dep_labels is None:
+        exclude_dep_labels = ["dwp"]
     gen_rule_target = GenRuleTarget(
             name=name,
             srcs=srcs,

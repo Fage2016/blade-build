@@ -14,8 +14,6 @@ This is the CmdOptions module which parses the users'
 input and provides hint for users.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import traceback
@@ -29,7 +27,7 @@ from blade import dsl_api
 from blade import restricted
 from blade import target_tags
 
-from blade.pathlib import Path
+from pathlib import Path
 from blade.util import path_under_dir, var_to_list, exec_file, source_location
 
 
@@ -53,7 +51,6 @@ def _load_build_rules():
     import blade.sh_test_target
     import blade.swig_library_target
     import blade.thrift_library
-    import blade.fbthrift_library
 
     build_rules.register_variable('build_target', build_attributes.attributes)
 
@@ -81,7 +78,7 @@ def _find_dir_dependent(dir, blade):
 
 def _report_not_exist(kind, path, source_dir, blade):
     """Report dir or BUILD file does not exist."""
-    msg = '%s "//%s" does not exist' % (kind, path)
+    msg = f'{kind} "//{path}" does not exist'
     dependent = _find_dir_dependent(source_dir, blade)
     (dependent or console).error(msg)
 
@@ -119,6 +116,10 @@ def glob(include, exclude=None, excludes=None, allow_empty=False):
     source_loc = _current_source_location()
     include = var_to_list(include)
     severity = config.get_item('global_config', 'glob_error_severity')
+    for pattern in include:
+        if '..' in pattern.split(os.sep):
+            console.diagnose(source_loc, 'error',
+                             '"glob" pattern must not contain "..": %s' % pattern)
     if excludes:
         console.diagnose(source_loc, severity, '"excludes" is deprecated, use "exclude" instead')
     exclude = var_to_list(exclude) + var_to_list(excludes)
@@ -251,6 +252,7 @@ def load(name, *symbols, **aliases):
         symbols: str*, symbol names to be imported.
         aliases: alias_name='real_name'*, symbol name to be imported as alias.
     """
+    assert __current_globals is not None, 'not in BUILD file context'
     src_loc = _current_source_location()
     if not symbols and not aliases:
         console.diagnose(src_loc, 'error', 'The symbols to be imported must be explicitly declared')
@@ -258,7 +260,7 @@ def load(name, *symbols, **aliases):
     extension_globals = _load_extension(name)
 
     def error(symbol):
-        console.diagnose(src_loc, 'error', '"%s" is not defined in "%s"' % (symbol, name))
+        console.diagnose(src_loc, 'error', f'"{symbol}" is not defined in "{name}"')
 
     if '*' in symbols:
         # Wildcard import import all symbols except aliases.
@@ -316,8 +318,7 @@ def __load_build_file(source_dir, blade):
             except SystemExit:
                 console.fatal('%s: Fatal error' % build_file)
             except Exception:
-                console.fatal('Parse error in %s\n%s' % (
-                    build_file, traceback.format_exc()))
+                console.fatal(f'Parse error in {build_file}\n{traceback.format_exc()}')
         else:
             _report_not_exist('File', build_file, source_dir, blade)
     finally:
@@ -357,22 +358,21 @@ def _check_under_skipped_dir(dirname):
     Return:
         Full path of the skip file or empty if it is not under a skipped dir.
     """
-    cache = _check_under_skipped_dir.cache
-    if dirname in cache:
-        return cache[dirname]
+    if dirname in _check_under_skipped_dir_cache:
+        return _check_under_skipped_dir_cache[dirname]
     if dirname in ('.', ''):
         return ''
     for skipfile in _SKIP_FILES:
         filepath = os.path.join(dirname, skipfile)
         if os.path.exists(filepath):
-            cache[dirname] = filepath
+            _check_under_skipped_dir_cache[dirname] = filepath
             return filepath
     result = _check_under_skipped_dir(os.path.dirname(dirname))
-    cache[dirname] = result
+    _check_under_skipped_dir_cache[dirname] = result
     return result
 
 
-_check_under_skipped_dir.cache = {}
+_check_under_skipped_dir_cache: dict = {}
 
 
 def _has_load_excluded_file(root, files):
@@ -384,7 +384,7 @@ def _has_load_excluded_file(root, files):
         console.info('Skip nested workspace "%s"' % root)
         return True
     if _BLADE_SKIP_FILE in files:
-        console.info('Skip "%s" due to the "%s" file' % (root, _BLADE_SKIP_FILE))
+        console.info(f'Skip "{root}" due to the "{_BLADE_SKIP_FILE}" file')
         return True
     return False
 
@@ -439,7 +439,7 @@ def _compile_filter(blade):
 
     filter_function, error = target_tags.compile_filter(expr)
     if error:
-        console.error('Invalid "--tags-filter" expression: ' + error)
+        console.error('Invalid "--tags-filter" expression: ' + error)  # pyright: ignore[reportOperatorIssue]
     return filter_function
 
 
@@ -491,7 +491,7 @@ def _expand_target_patterns(blade, target_ids, excluded_trees):
 
         skip_file = _check_under_skipped_dir(source_dir)
         if skip_file:
-            console.warning('"%s" is under skipped directory due to "%s", ignored' % (target_id, skip_file))
+            console.warning(f'"{target_id}" is under skipped directory due to "{skip_file}", ignored')
             continue
 
         if target_name == '...':
@@ -554,7 +554,8 @@ def _load_related_build_files(blade, command_targets, processed_dirs):
         skip_file = _check_under_skipped_dir(source_dir)
         if skip_file:
             dependent = _find_dependent(target_id, blade)
-            dependent.error('"%s" is under skipped directory due to "%s"' % (target_id, skip_file))
+            if dependent is not None:
+                dependent.error(f'"{target_id}" is under skipped directory due to "{skip_file}"')
             continue
 
         if not _load_build_file(source_dir, processed_dirs, blade):

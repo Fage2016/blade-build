@@ -12,13 +12,15 @@
 This is the util module which provides command functions.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import datetime
 import os
 import sys
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import NoReturn
 
 ##############################################################################
 # Color and screen
@@ -90,6 +92,7 @@ def set_log_file(log_file):
 
 def get_log_file():
     """Return the global log file name."""
+    assert _log is not None, 'log file not set'
     return _log.name
 
 
@@ -161,7 +164,7 @@ def _progress_bar(progress, current, total):
     [===========================================================----] 46/50 92%
     """
     width = progress * _PROGRESS_BAR_WIDTH // 100
-    return '[%s%s] %s/%s %g%%' % ('=' * width, '-' * (_PROGRESS_BAR_WIDTH - width),
+    return '[{}{}] {}/{} {:g}%'.format('=' * width, '-' * (_PROGRESS_BAR_WIDTH - width),
                                   current, total, progress)
 
 
@@ -235,7 +238,7 @@ def error(msg, prefix=True):
     _error_count += 1
 
 
-def fatal(msg, code=1, prefix=True):
+def fatal(msg: str, code: int = 1, prefix: bool = True) -> 'NoReturn':
     """dump error message and exit."""
     error(msg, prefix=prefix)
     sys.exit(code)
@@ -278,7 +281,7 @@ def debug(msg, prefix=True):
 def diagnose(source_location, severity, message):
     """Output diagnostic message with source location and severity."""
     assert severity in ('debug', 'info', 'notice', 'warning', 'error')
-    globals()[severity]("%s: %s: %s" % (source_location, severity, message), prefix=False)
+    globals()[severity](f"{source_location}: {severity}: {message}", prefix=False)
 
 
 def flush():

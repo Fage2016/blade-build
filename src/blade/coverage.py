@@ -8,8 +8,6 @@
 Code Test Coverage.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import collections
 import os
@@ -20,7 +18,7 @@ from blade import config
 from blade import console
 
 
-class JacocoReporter(object):
+class JacocoReporter:
     """
     Jacoco Coverage Report Generator
     """
@@ -36,8 +34,6 @@ class JacocoReporter(object):
             if target.attr.get('jacoco_coverage'):
                 self.__coverage_targets.append(target)
 
-    # Copied from BinaryRunner
-    # TODO(chen3feng): DRY
     def _executable(self, target):
         """Returns the executable path."""
         return os.path.join(self.__build_dir, target.path, target.name)
@@ -70,7 +66,7 @@ class JacocoReporter(object):
         """
         for cls in classes:
             if cls in checked_classes:
-                console.warning('Conflict: %s/%s already existed in %s' % (classes_path, cls, checked_classes[cls]))
+                console.warning(f'Conflict: {classes_path}/{cls} already existed in {checked_classes[cls]}')
                 return True
             checked_classes[cls] = classes_path
         return False
@@ -162,7 +158,7 @@ class JacocoReporter(object):
         with open(report_dir + '.packages.csv', 'w') as f:
             f.write('package_name,source_path\r\n')
             for package, path in mapping.items():
-                f.write('%s,%s\r\n' % (package, path))
+                f.write(f'{package},{path}\r\n')
 
     def generate(self):
         """Run jacococli to generate coverage report"""

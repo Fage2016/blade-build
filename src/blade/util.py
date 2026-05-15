@@ -12,9 +12,6 @@
 This is the util module which provides some helper functions.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
-
 import ast
 import errno
 import fcntl
@@ -22,23 +19,15 @@ import hashlib
 import inspect
 import json
 import os
+import pickle  # pylint: disable=unused-import
 import signal
-import string
 import subprocess
 import sys
 import zipfile
+from typing import TYPE_CHECKING
 
-
-_IN_PY3 = sys.version_info[0] == 3
-
-
-# In python 2, cPickle is much faster than pickle, but in python 3, pickle is
-# reimplemented in C extension and then the standalone cPickle is removed.
-if _IN_PY3:
-    import pickle  # pylint: disable=unused-import
-else:
-    # pyright: reportMissingImports=false
-    import cPickle as pickle  # pylint: disable=import-error, unused-import
+if TYPE_CHECKING:
+    from blade.blade_types import StrOrListOpt  # noqa: F401 (used in annotations)
 
 
 def md5sum_bytes(content):
@@ -79,7 +68,7 @@ def lock_file(filename):
         fcntl.fcntl(fd, fcntl.F_SETFD, old_fd_flags | fcntl.FD_CLOEXEC)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return fd, 0
-    except IOError as ex_value:
+    except OSError as ex_value:
         return -1, ex_value.errno
 
 
@@ -88,21 +77,41 @@ def unlock_file(fd):
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    except IOError:
+    except OSError:
         pass
 
 
-def var_to_list(var):
-    """Normalize a singlar or list to list."""
+def var_to_list(var: 'StrOrListOpt | tuple[str, ...] | set[str] | frozenset[str]') -> list[str]:
+    """Normalize a singular, iterable, or None into a fresh ``list[str]``.
+
+    This is the canonical normalization helper for rule-entry parameters.
+
+    Accepted inputs:
+
+    - ``None``                               -> ``[]`` (treated as "no values")
+    - ``list``                               -> shallow copy (caller-safe)
+    - ``tuple`` / ``set`` / ``frozenset``    -> materialized into a list
+    - any other scalar (typically ``str``)   -> wrapped as ``[var]``
+
+    The returned list is always a fresh object, so callers may mutate it
+    without affecting the input.
+    """
     if isinstance(var, list):
         return var[:]
     if var is None:
         return []
+    if isinstance(var, (tuple, set, frozenset)):
+        return list(var)
     return [var]
 
 
-def var_to_list_or_none(var):
-    """Similar to var_to_list but keeps the None unchanged"""
+def var_to_list_or_none(var: 'StrOrListOpt') -> 'list[str] | None':
+    """Like :func:`var_to_list`, but preserves ``None`` as a distinct sentinel.
+
+    Use this when the parameter has a meaningful "not configured" state that
+    must not collapse into an empty list (for instance, default visibility
+    vs. explicit "visible to nobody").
+    """
     if var is None:
         return var
     return var_to_list(var)
@@ -144,7 +153,7 @@ def find_file_bottom_up(name, from_dir=None):
     """
     if from_dir is None:
         from_dir = get_cwd()
-    finding_dir = os.path.abspath(from_dir)
+    finding_dir = os.path.abspath(from_dir)  # pyright: ignore[reportCallIssue, reportArgumentType]
     while True:
         path = os.path.join(finding_dir, name)
         if os.path.exists(path):
@@ -211,13 +220,8 @@ def run_command(args, **kwargs):
     kwargs.setdefault('stdout', subprocess.PIPE)
     kwargs.setdefault('stderr', subprocess.PIPE)
 
-    if _IN_PY3:
-        r = subprocess.run(args, universal_newlines=True, **kwargs)
-        return r.returncode, r.stdout, r.stderr
-    else:
-        p = subprocess.Popen(args, universal_newlines=True, **kwargs)
-        stdout, stderr = p.communicate()
-        return p.returncode, stdout, stderr
+    r = subprocess.run(args, text=True, **kwargs)
+    return r.returncode, r.stdout, r.stderr
 
 
 def load_scm(build_dir):
@@ -247,25 +251,11 @@ def cpu_count():
         return int(os.sysconf('SC_NPROCESSORS_ONLN'))
 
 
-_TRANS_TABLE = (str if _IN_PY3 else string).maketrans(',-/:.+*', '_______')
-
+_TRANS_TABLE = str.maketrans(',-/:.+*', '_______')
 
 def regular_variable_name(name):
     """convert some name to a valid identifier name"""
     return name.translate(_TRANS_TABLE)
-
-# Some python 2/3 compatibility helpers.
-if _IN_PY3:
-    def iteritems(d):
-        return d.items()
-    def itervalues(d):
-        return d.values()
-else:
-    def iteritems(d):
-        return d.iteritems()
-    def itervalues(d):
-        return d.itervalues()
-
 
 def exec_file_content(filename, content, globals, locals):
     """Execute code content as filename"""
@@ -304,7 +294,7 @@ def source_location(filename):
             lineno = frame.f_lineno
             break
         frame = frame.f_back
-    return '%s:%s' % (full_filename, lineno)
+    return f'{full_filename}:{lineno}'
 
 
 def calling_source_location(skip=0):
@@ -314,7 +304,7 @@ def calling_source_location(skip=0):
     frame = inspect.currentframe()
     while frame:
         if skipped == skip:
-            return '%s:%s' % (frame.f_code.co_filename, frame.f_lineno)
+            return f'{frame.f_code.co_filename}:{frame.f_lineno}'
         frame = frame.f_back
         skipped += 1
     raise ValueError('Invalid value "%d" for "skip"' % skip)
@@ -348,11 +338,6 @@ def parse_command_line(argv):
 def open_zip_file_for_write(filename, compression_level):
     """Open a zip file for writing with specified compression level."""
     compression = zipfile.ZIP_DEFLATED
-    if sys.version_info.major < 3 or sys.version_info.major == 3 and sys.version_info.minor < 7:
-        if compression_level == "0":
-            compression = zipfile.ZIP_STORED
-        return zipfile.ZipFile(filename, 'w', compression, allowZip64=True)
-    # pylint: disable=unexpected-keyword-arg
     return zipfile.ZipFile(filename, 'w', compression, compresslevel=int(compression_level), allowZip64=True)
 
 

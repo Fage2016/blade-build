@@ -1,21 +1,21 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# This workflow will install Python dependencies, run tests and type-check with a variety of Python versions
 # For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
 
 name: Python package
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, v3 ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, v3 ]
 
 jobs:
-  build:
-
+  integration-tests:
+    name: Integration tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        python-version: ["3.7", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@v6
@@ -28,6 +28,95 @@ jobs:
         python -m pip install --upgrade pip
         python -m pip install coverage coveralls ninja
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Run tests
+    - name: Run integration tests
       run: |
         src/test/runall.sh
+
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements-dev.txt
+    - name: Run unit tests
+      run: |
+        PYTHONPATH=src python -m pytest src/tests/unit -v
+
+  pyright:
+    name: Type check (pyright)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Install pyright
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements-dev.txt
+    - name: Run pyright
+      run: |
+        pyright
+
+  e2e-smoke:
+    # Cross-repo smoke: drive the real build/test loop against the
+    # blade-build/blade-test fixtures. Blocking — first run was fully
+    # green in under a minute, so this gate protects the v3 → blade-test
+    # contract. If host-toolchain flakes emerge, reintroduce
+    # `continue-on-error: true` as a temporary circuit breaker rather
+    # than leaving it on by default.
+    name: E2E smoke (blade-test)
+    needs: [integration-tests, unit-tests, pyright]
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout blade-build
+      uses: actions/checkout@v6
+      with:
+        path: blade-build
+    - name: Checkout blade-test (sibling)
+      uses: actions/checkout@v6
+      with:
+        repository: blade-build/blade-test
+        path: blade-test
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Install ninja
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ninja-build
+    - name: Install e2e toolchain (flex/bison/protoc)
+      # Pre-install toolchains required by the upcoming blade-test suites
+      # migrated from blade-build/example/: lex_yacc needs flex + bison,
+      # proto_basic needs protoc + libprotobuf-dev, py_proto additionally
+      # needs python3-protobuf at runtime. These packages are idempotent
+      # no-ops for suites that do not consume them, so installing them
+      # ahead of the suite PRs keeps later commits focused.
+      run: |
+        sudo apt-get install -y flex bison protobuf-compiler libprotobuf-dev python3-protobuf
+    - name: Install googletest at BLADE_ROOT-expected prefix
+      # blade-test/BLADE_ROOT points cc search paths at
+      # /usr/local/opt/googletest/{include,lib} on Linux. Ubuntu's
+      # libgtest-dev ships sources only, so build and stage them there.
+      run: |
+        sudo apt-get install -y libgtest-dev libgmock-dev cmake
+        sudo cmake -S /usr/src/googletest -B /tmp/gtest-build \
+          -DCMAKE_INSTALL_PREFIX=/usr/local/opt/googletest
+        sudo cmake --build /tmp/gtest-build --target install -j
+    - name: Run blade-test suites
+      working-directory: blade-test
+      run: |
+        ./blade.sh test //suites/...

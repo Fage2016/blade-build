@@ -4,21 +4,10 @@
 # Author: chen3feng <chen3feng@gmail.com>
 # Date:   2021-03-04
 
-import sys
+import builtins
 
 from blade import console
 from blade import util
-
-_IS_PY2 = sys.version_info.major == 2
-
-if _IS_PY2:
-    # pylint: disable=import-error
-    # pyright: reportMissingImports=false
-    import __builtin__ as builtins
-else:
-    # Do not attempt to use this package on Python2.7 as there
-    # might be backports for this package such as future.
-    import builtins
 
 _SAFE_NAMES = [
     'None',
@@ -108,22 +97,9 @@ _SAFE_EXCEPTIONS = [
     'ZeroDivisionError',
 ]
 
-if _IS_PY2:
-    _SAFE_NAMES.extend([
-        'basestring',
-        'cmp',
-        'long',
-        'unichr',
-        'unicode',
-        'xrange',
-    ])
-    _SAFE_EXCEPTIONS.extend([
-        'StandardError',
-    ])
-else:
-    _SAFE_NAMES.extend([
-        '__build_class__',  # needed to define new classes
-    ])
+_SAFE_NAMES.extend([
+    '__build_class__',  # needed to define new classes
+])
 
 
 # Replace some functions to better help users know how to deal with.
@@ -146,11 +122,12 @@ def _make_forbidden_wrapper(name):
 
 def _open(name, mode=None, buffering=None):
     """A Readonly open function"""
-    if mode is None and buffering is None:
-        return open(name)
-    if mode:
-        if 'w' in mode or 'a' in mode:
-            raise ValueError('"open" only allow readonly mode')
+    if mode is None:
+        if buffering is None:
+            return open(name)
+        return open(name, buffering=buffering)
+    if 'w' in mode or 'a' in mode:
+        raise ValueError('"open" only allow readonly mode')
     if buffering is None:
         return open(name, mode)
     return open(name, mode, buffering)

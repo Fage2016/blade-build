@@ -9,8 +9,6 @@
 Main entrence of blade.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import cProfile
 import os
@@ -59,7 +57,7 @@ def _check_error_log(stage):
     """Check whether any error log occur during stage."""
     error_count = console.error_count()
     if error_count > 0:
-        console.error('There are %s errors in the %s stage' % (error_count, stage))
+        console.error(f'There are {error_count} errors in the {stage} stage')
         return 1
     return 0
 

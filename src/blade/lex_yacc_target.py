@@ -8,41 +8,47 @@
 Define lex_yacc_library target.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 from blade import build_manager
 from blade import build_rules
+from blade.blade_types import StrOrListOpt
 from blade.cc_targets import CcTarget
-from blade.util import var_to_list
+from blade.util import var_to_list, var_to_list_or_none
 
 
 class LexYaccLibrary(CcTarget):
     """This class generates lex yacc rules."""
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 warning,
-                 defs,
-                 incs,
-                 extra_cppflags,
-                 extra_linkflags,
-                 allow_undefined,
-                 recursive,
-                 prefix,
-                 lexflags,
-                 yaccflags,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 warning: str,
+                 defs: StrOrListOpt,
+                 incs: StrOrListOpt,
+                 extra_cppflags: StrOrListOpt,
+                 extra_linkflags: StrOrListOpt,
+                 allow_undefined: bool,
+                 recursive: bool,
+                 prefix: str | None,
+                 lexflags: StrOrListOpt,
+                 yaccflags: StrOrListOpt,
+                 kwargs: dict[str, object]):
         """Init method.
 
         Init the cc lex yacc target
 
         """
-        super(LexYaccLibrary, self).__init__(
+        # Normalize before forwarding to CcTarget.__init__
+        srcs = var_to_list(srcs)
+        deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        defs = var_to_list(defs)
+        incs = var_to_list(incs)
+        visibility = var_to_list_or_none(visibility)
+        super().__init__(
                 name=name,
                 type='lex_yacc_library',
                 srcs=srcs,
@@ -155,22 +161,22 @@ class LexYaccLibrary(CcTarget):
 
 
 def lex_yacc_library(
-        name,
-        srcs=[],
-        deps=[],
-        visibility=None,
-        tags=[],
-        warning='yes',
-        defs=[],
-        incs=[],
-        extra_cppflags=None,
-        extra_linkflags=None,
-        allow_undefined=False,
-        recursive=False,
-        prefix=None,
-        lexflags=[],
-        yaccflags=[],
-        **kwargs):
+        name: str,
+        srcs: StrOrListOpt = None,
+        deps: StrOrListOpt = None,
+        visibility: StrOrListOpt = None,
+        tags: StrOrListOpt = None,
+        warning: str = 'yes',
+        defs: StrOrListOpt = None,
+        incs: StrOrListOpt = None,
+        extra_cppflags: StrOrListOpt = None,
+        extra_linkflags: StrOrListOpt = None,
+        allow_undefined: bool = False,
+        recursive: bool = False,
+        prefix: str | None = None,
+        lexflags: StrOrListOpt = None,
+        yaccflags: StrOrListOpt = None,
+        **kwargs: object):
     """lex_yacc_library."""
     target = LexYaccLibrary(
             name=name,

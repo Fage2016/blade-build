@@ -9,8 +9,6 @@ This is the maven module which manages jar files downloaded
 from maven repository.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import shutil
@@ -18,10 +16,7 @@ import subprocess
 import threading
 import time
 
-try:
-    import queue
-except ImportError:
-    import Queue as queue  # pyright: reportMissingImports=false, for python2
+import queue
 
 from blade import config
 from blade import console
@@ -37,7 +32,7 @@ def is_valid_id(id):
     return False
 
 
-class MavenArtifact(object):
+class MavenArtifact:
     """
     MavenArtifact represents a jar artifact and its transitive dependencies
     separated by colon in maven cache.
@@ -51,7 +46,7 @@ class MavenArtifact(object):
         return repr(self.__dict__)
 
 
-class MavenCache(object):
+class MavenCache:
     """MavenCache. Manages maven jar files."""
 
     __instance = None
@@ -154,7 +149,7 @@ class MavenCache(object):
             return True
 
         if classifier:
-            id = '%s:%s' % (id, classifier)
+            id = f'{id}:{classifier}'
         target.info('Downloading maven_jar %s' % id)
         cmd = [self.__maven,
                'dependency:get',
@@ -168,7 +163,7 @@ class MavenCache(object):
         with open(log_path, 'w') as logf:
             rc = subprocess.call(cmd, stdout=logf)
         if rc != 0:
-            message = ('Error downloading maven_jar %s, see "%s" for details.' % (id, log_path))
+            message = (f'Error downloading maven_jar {id}, see "{log_path}" for details.')
             # Rertry without transitive
             cmd.append('-Dtransitive=false')
             with open(log_path, 'a') as f:
@@ -182,7 +177,7 @@ class MavenCache(object):
             target.warning('Downloaded maven_jar %s, but without its transitive dependencies.' % id)
         try:
             shutil.move(log_path, target_log)
-        except IOError:
+        except OSError:
             # When multiple threads download same artifact
             pass
 
@@ -221,7 +216,7 @@ class MavenCache(object):
         with open(log, 'w') as logf:
             rc = subprocess.call(cmd, stdout=logf)
         if rc != 0:
-            target.warning('Failed to query dependencies of %s , see "%s" for details.' % (id, log))
+            target.warning(f'Failed to query dependencies of {id} , see "{log}" for details.')
             try:
                 os.remove(classpath_tmp)
             except OSError:
@@ -230,7 +225,7 @@ class MavenCache(object):
 
         try:
             shutil.move(classpath_tmp, classpath)
-        except IOError:
+        except OSError:
             # When multiple threads download same artifact
             pass
 

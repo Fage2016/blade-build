@@ -9,15 +9,14 @@ This is the package target module which packages files
 into an (compressed) archive.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 
 from blade import build_manager
 from blade import build_rules
+from blade.blade_types import StrOrListOpt
 from blade.target import Target, LOCATION_RE
-from blade.util import which, var_to_list
+from blade.util import which, var_to_list, var_to_list_or_none
 
 
 _package_types = frozenset([
@@ -41,30 +40,32 @@ class PackageTarget(Target):
     """
 
     def __init__(self,
-                 name,
-                 srcs,
-                 deps,
-                 visibility,
-                 tags,
-                 type,
-                 out,
-                 shell,
-                 kwargs):
+                 name: str | None,
+                 srcs: StrOrListOpt,
+                 deps: StrOrListOpt,
+                 visibility: StrOrListOpt,
+                 tags: StrOrListOpt,
+                 type: str,
+                 out: str | None,
+                 shell: bool,
+                 kwargs: dict[str, object]):
         srcs = var_to_list(srcs)
         deps = var_to_list(deps)
+        tags = var_to_list(tags)
+        visibility = var_to_list_or_none(visibility)
 
-        super(PackageTarget, self).__init__(
+        super().__init__(
                 name=name,
                 type='package',
                 srcs=[],
-                src_exts=None,
+                src_exts=[],
                 deps=deps,
                 visibility=visibility,
                 tags=tags,
                 kwargs=kwargs)
 
         if type not in _package_types:
-            self.error('Invalid type %s. Types supported by the package are %s' % (
+            self.error('Invalid type {}. Types supported by the package are {}'.format(
                        type, ', '.join(sorted(_package_types))))
         self.attr['type'] = type
         self.attr['sources'] = []
@@ -73,7 +74,7 @@ class PackageTarget(Target):
         self._process_srcs(srcs)
 
         if not out:
-            out = '%s.%s' % (name, type)
+            out = f'{name}.{type}'
         self.attr['out'] = out
         self.attr['shell'] = shell
 
@@ -107,7 +108,7 @@ class PackageTarget(Target):
         Return src full path within the workspace and mapping path in the archive.
         """
         if '..' in src or '..' in dst:
-            self.error('Invalid src (%s, %s). Relative path is not allowed.' % (src, dst))
+            self.error(f'Invalid src ({src}, {dst}). Relative path is not allowed.')
 
         if src.startswith('//'):
             src = src[2:]
@@ -145,7 +146,7 @@ class PackageTarget(Target):
         for key, type, dst in self.attr['locations']:
             path = targets[key]._get_target_file(type)
             if not path:
-                self.warning('Location %s %s is missing. Ignored.' % (key, type))
+                self.warning(f'Location {key} {type} is missing. Ignored.')
                 continue
             if not dst:
                 dst = os.path.basename(path)
@@ -193,15 +194,15 @@ class PackageTarget(Target):
         self.generate_build(rule, output, inputs=package_sources, variables=vars)
 
 
-def package(name=None,
-            srcs=[],
-            deps=[],
-            visibility=None,
-            tags=[],
-            type='tar',
-            out=None,
-            shell=False,
-            **kwargs):
+def package(name: str,
+            srcs: StrOrListOpt = None,
+            deps: StrOrListOpt = None,
+            visibility: StrOrListOpt = None,
+            tags: StrOrListOpt = None,
+            type: str = 'tar',
+            out: str | None = None,
+            shell: bool = False,
+            **kwargs: object):
     package_target = PackageTarget(
             name=name,
             srcs=srcs,

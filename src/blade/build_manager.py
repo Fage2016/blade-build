@@ -10,8 +10,6 @@ This is the blade module which mainly holds the global database and
 do the coordination work between classes.
 """
 
-from __future__ import absolute_import
-from __future__ import print_function
 
 import json
 import os
@@ -40,9 +38,7 @@ instance = None
 # Start of fingerprint line in each per-target ninja file
 _NINJA_FILE_FINGERPRINT_START = '#Fingerprint='
 
-_ALL_COMMAND_TARGETS = '__ALL_COMMAND_TARGETS__'
-
-class Blade(object):
+class Blade:
     """Blade. A blade manager class."""
 
     # pylint: disable=too-many-public-methods
@@ -203,7 +199,7 @@ class Blade(object):
             self.get_build_dir(),
             self.build_script(),
             self.build_jobs_num(),
-            targets='',  # FIXME: because not all targets has a targets
+            targets='',  # empty => build all default ninja targets
             options=self.__options)
         self._write_build_stamp_file(start_time, returncode)
         if returncode != 0:
@@ -261,7 +257,7 @@ class Blade(object):
         for key in self.__expanded_command_targets:
             target = self.__build_targets[key]
             clean_list = target.get_clean_list()
-            console.debug('Cleaning %s: %s' % (target.fullname, clean_list))
+            console.debug(f'Cleaning {target.fullname}: {clean_list}')
             # Batch removing is much faster than one by one
             paths += clean_list
             if len(paths) > 10000:  # Avoid 'Argument list too long' error.
@@ -315,7 +311,7 @@ class Blade(object):
                     print('%s' % d, file=output_file)
 
     def print_dot_node(self, output_file, node):
-        print('"%s" [label = "%s"]' % (node, node), file=output_file)
+        print(f'"{node}" [label = "{node}"]', file=output_file)
 
     def print_dot_deps(self, output_file, node, target_set):
         targets = self.__build_targets
@@ -323,7 +319,7 @@ class Blade(object):
         for i in deps:
             if i not in target_set:
                 continue
-            print('"%s" -> "%s"' % (node, i), file=output_file)
+            print(f'"{node}" -> "{i}"', file=output_file)
 
     def __print_dot_graph(self, attr_name, output_file):
         # Collect all related nodes
@@ -363,8 +359,7 @@ class Blade(object):
                 self.__options.query_path_to.split(','),
                 self.__working_dir):
             if id not in self.__target_database:
-                console.fatal('Invalid argument: "--path-to=%s", target "%s" does not exist' % (
-                        self.__options.query_path_to, id))
+                console.fatal(f'Invalid argument: "--path-to={self.__options.query_path_to}", target "{id}" does not exist')
             result.add(id)
         return result
 
@@ -373,9 +368,9 @@ class Blade(object):
         if level == 0:
             output = '%s' % key
         elif level == 1:
-            output = '%s %s' % ('+-', key)
+            output = '{} {}'.format('+-', key)
         else:
-            output = '%s%s %s' % ('|  ' * (level - 1), '+-', key)
+            output = '{}{} {}'.format('|  ' * (level - 1), '+-', key)
         print(output, file=output_file)
         for dkey in getattr(self.__build_targets[key], query_attr):
             if self._query_path_match(dkey, path_to):
@@ -488,7 +483,7 @@ class Blade(object):
         key = target.key
         # Check whether there is already a key in database
         if key in self.__target_database:
-            console.fatal('Target %s is duplicate in //%s/BUILD' % (target.name, target.path))
+            console.fatal(f'Target {target.name} is duplicate in //{target.path}/BUILD')
         self.__target_database[key] = target
 
     def _read_fingerprint(self, ninja_file):
@@ -498,7 +493,7 @@ class Blade(object):
                 first_line = f.readline()
                 if first_line.startswith(_NINJA_FILE_FINGERPRINT_START):
                     return first_line[len(_NINJA_FILE_FINGERPRINT_START):].strip()
-        except IOError:
+        except OSError:
             pass
         return None
 
@@ -508,7 +503,7 @@ class Blade(object):
         if not os.path.exists(target_dir):
             os.makedirs(target_dir)
         with open(ninja_file, 'w') as f:
-            f.write('%s%s\n\n' % (_NINJA_FILE_FINGERPRINT_START, fingerprint))
+            f.write(f'{_NINJA_FILE_FINGERPRINT_START}{fingerprint}\n\n')
             f.writelines(code)
 
     def _find_or_generate_target_ninja_file(self, target):
@@ -539,7 +534,6 @@ class Blade(object):
         code = []
         skip_test = getattr(self.__options, 'no_test', False)
         skip_package = not getattr(self.__options, 'generate_package', False)
-        command_target_outputs = []
         for k in self.__sorted_targets_keys:
             target = self.__build_targets[k]
             if skip_test and target.type.endswith('_test') and k not in self.__direct_targets:
@@ -551,11 +545,6 @@ class Blade(object):
             if target_ninja:
                 target._remove_on_clean(target_ninja)
                 code += 'include %s\n' % target_ninja
-                if k in self.__expanded_command_targets:
-                    command_target_outputs.append(target.get_outputs_goal())
-        # TODO: reland this feature
-        # code.append('build %s: phony %s\n' % (_ALL_COMMAND_TARGETS, ' '.join(command_target_outputs)))
-        # code.append('default %s\n' % (_ALL_COMMAND_TARGETS))
         return code
 
     def get_build_toolchain(self):
