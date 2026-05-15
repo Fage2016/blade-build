@@ -69,7 +69,7 @@ V3 中 `load()` 和 `glob()` 等扩展机制保持不变。以下新增了路径
 ## V2 → V3 升级步骤
 
 1. **升级 Python 环境**：确保 Python 3.10+ 可用，并设置为 blade 的默认解释器。
-2. **更新 blade 自身**：拉取 v3 分支代码。
+2. **更新 blade 自身**：拉取 `master` 分支代码，或 checkout 最新 v3 tag（如 `v3.0.0-beta`）。
 3. **检查 BUILD 文件**：如有 `fbthrift_library` 引用，改为 `thrift_library`。
 4. **检查 BLADE_ROOT**：移除 `fbthrift_library_config` 调用（非必须，建议清理）。
 5. **验证编译器**：macOS 用户确认 clang 可用；Linux 用户确认 GCC 或 clang 可用。

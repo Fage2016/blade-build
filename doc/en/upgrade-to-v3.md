@@ -68,7 +68,7 @@ The `fbthrift_library_config` call has been removed from `blade.conf`. If your `
 ## V2 → V3 Upgrade Steps
 
 1. **Upgrade Python**: ensure Python 3.10+ is available and set as blade's default interpreter.
-2. **Update blade**: pull the v3 branch.
+2. **Update blade**: pull the `master` branch or checkout the latest v3 tag (e.g. `v3.0.0-beta`).
 3. **Check BUILD files**: replace any `fbthrift_library` references with `thrift_library`.
 4. **Check BLADE_ROOT**: remove `fbthrift_library_config` calls (optional but recommended).
 5. **Verify compiler**: macOS users, confirm clang is available; Linux users, confirm GCC or clang.
