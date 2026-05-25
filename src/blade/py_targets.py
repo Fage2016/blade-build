@@ -229,7 +229,13 @@ class PythonBinary(PythonLibrary):
         return rel_path.replace('/', '.')
 
     def generate(self):
-        output = self._target_file_path(self.name)
+        if os.name == 'nt':
+            output = self._target_file_path(self.name + '.bat')
+            self.attr['executable_name'] = self.name + '.bat'
+        else:
+            output = self._target_file_path(self.name)
+            self.attr['executable_name'] = self.name
+        zip_output = self._target_file_path(self.name + '.zip')
         pylib = self._pylib()
         inputs = [pylib] if pylib else []
         targets = self.blade.get_build_targets()
@@ -243,7 +249,8 @@ class PythonBinary(PythonLibrary):
         vars = self._vars()
         vars['mainentry'] = self._get_entry()
         vars['exclusions'] = ','.join(self.attr['exclusions'])
-        self.generate_build('pythonbinary', output, inputs=inputs, variables=vars)
+        self.generate_build('pythonbinary', output, inputs=inputs,
+                            variables=vars, implicit_outputs=zip_output)
         self._add_default_target_file('bin', output)
 
 

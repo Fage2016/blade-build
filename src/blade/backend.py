@@ -14,7 +14,9 @@ objects to generate build rules.
 """
 
 
+import glob
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -58,6 +60,8 @@ def protoc_import_path_option(incs):
 
 def _shell_support_pipefail():
     """Whether current shell support the `pipefail` option."""
+    if os.name == 'nt':
+        return False
     return subprocess.call('set -o pipefail 2>/dev/null', shell=True) == 0
 
 
@@ -126,8 +130,12 @@ class _NinjaFileHeaderGenerator:
                 '''))
 
     def generate_common_rules(self):
+        if os.name == 'nt':
+            copy_cmd = 'cmd /c copy /y ${in} ${out} > nul'
+        else:
+            copy_cmd = 'cp -f ${in} ${out}'
         self.generate_rule(name='copy',
-                           command='cp -f ${in} ${out}',
+                           command=copy_cmd,
                            description='COPY ${in} ${out}')
 
     def _get_intrinsic_cc_flags(self):
@@ -212,15 +220,129 @@ class _NinjaFileHeaderGenerator:
         return filtered_cppflags, filtered_cxxflags, filtered_cflags, cuflags
 
     def generate_cc_rules(self):
+        if self.build_toolchain.cc_is('msvc'):
+            self._generate_windows_cc_rules()
+        else:
+            cc, cxx, ld = self.build_accelerator.get_cc_commands()
+            cppflags, linkflags = self._get_intrinsic_cc_flags()
+            self._generate_cc_compile_rules(cc, cxx, cppflags)
+            self._generate_cc_inclusion_check_rule()
+            self._generate_cc_ar_rules()
+            self._generate_cc_link_rules(ld, linkflags)
+            self.generate_rule(name='strip',
+                               command='strip --strip-unneeded -o ${out} ${in}',
+                               description='STRIP ${out}')
+
+    def _generate_windows_cc_rules(self):
+        """Generate Windows/MSVC-specific CC rules."""
         cc, cxx, ld = self.build_accelerator.get_cc_commands()
-        cppflags, linkflags = self._get_intrinsic_cc_flags()
-        self._generate_cc_compile_rules(cc, cxx, cppflags)
+        self._generate_windows_cc_vars()
+        self._generate_windows_cc_compile_rules(cc, cxx)
         self._generate_cc_inclusion_check_rule()
-        self._generate_cc_ar_rules()
-        self._generate_cc_link_rules(ld, linkflags)
-        self.generate_rule(name='strip',
-                           command='strip --strip-unneeded -o ${out} ${in}',
-                           description='STRIP ${out}')
+        self._generate_windows_ar_rules()
+        self._generate_windows_link_rules()
+
+    def _generate_windows_cc_vars(self):
+        """Generate Windows-specific CC variables."""
+        windows_config = config.get_section('msvc_config')
+        cc_config = config.get_section('cc_config')
+        # Combine windows_config warnings with filtered cc_config warnings
+        c_warnings = (windows_config['warnings'] +
+                      self.build_toolchain.filter_cc_flags(cc_config['c_warnings'], 'c'))
+        cxx_warnings = (windows_config['warnings'] +
+                        self.build_toolchain.filter_cc_flags(cc_config['cxx_warnings'], 'c++'))
+        self._add_line(textwrap.dedent('''\
+                c_warnings = %s
+                cxx_warnings = %s
+                ''') % (' '.join(c_warnings), ' '.join(cxx_warnings)))
+
+    def _generate_windows_cc_compile_rules(self, cc, cxx):
+        """Generate Windows CC compilation rules."""
+        windows_config = config.get_section('msvc_config')
+        cc_config = config.get_section('cc_config')
+
+        # Combine windows_config flags with filtered cc_config flags.
+        # cc_config flags (from BLADE_ROOT) typically use GCC syntax and get
+        # mapped/filtered by the toolchain (e.g. -std=c++17 → /std:c++17).
+        filtered_cc_cflags = self.build_toolchain.filter_cc_flags(cc_config['cflags'], 'c')
+        filtered_cc_cxxflags = self.build_toolchain.filter_cc_flags(cc_config['cxxflags'], 'c++')
+        filtered_cc_cppflags = self.build_toolchain.filter_cc_flags(cc_config['cppflags'])
+
+        cppflags = windows_config['cppflags'] + filtered_cc_cppflags
+        cflags = windows_config['cflags'] + filtered_cc_cflags
+        cxxflags = windows_config['cxxflags'] + filtered_cc_cxxflags
+        # System includes (MSVC + Windows SDK) discovered by the toolchain,
+        # then user-specified extra_incs, then build directory.
+        system_includes = self.build_toolchain.get_system_include_paths()
+        includes = system_includes + cc_config['extra_incs'] + ['.', self.build_dir]
+        # MSVC accepts /I"path with spaces" (quoted, no space after /I).
+        # Use a helper that quotes paths containing spaces.
+        def _quote_if_needed(p):
+            return f'/I"{p}"' if ' ' in p else f'/I{p}'
+        include_flags = ' '.join([_quote_if_needed(inc) for inc in includes])
+
+        optimize_flags = windows_config['optimize']
+        optimize = ' '.join(optimize_flags.get(self.options.profile, []))
+
+        cc_command = ('%s /nologo /c /showIncludes %s %s %s %s /Fo${out} ${c_warnings} ${in}' % (
+            cc, optimize, ' '.join(cppflags), ' '.join(cflags), include_flags))
+        self.generate_rule(name='cc',
+                           command=cc_command,
+                           description='CC ${in}',
+                           deps='msvc')
+
+        cxx_command = ('%s /nologo /c /showIncludes %s %s %s %s /Fo${out} ${cxx_warnings} ${in}' % (
+            cxx, optimize, ' '.join(cppflags), ' '.join(cxxflags), include_flags))
+        self.generate_rule(name='cxx',
+                           command=cxx_command,
+                           description='CXX ${in}',
+                           deps='msvc')
+
+        # For cxxhdrs: use /showIncludes to generate inclusion info.
+        # /P preprocesses (like GCC -E), /Tp forces C++ treatment of .h files.
+        # Wrap with cmd /c because Ninja on Windows can't handle shell redirections directly.
+        # Fall back to empty output on failure so the build can continue.
+        hdrs_command = ('cmd /c "%s /nologo /P /Tp${in} /showIncludes %s %s %s %s /Fi${out}.pre 2> ${out}'
+                        ' || (echo. > ${out}.pre & echo. > ${out})"' % (
+            cxx, optimize, ' '.join(cppflags), ' '.join(cxxflags), include_flags))
+        self.generate_rule(name='cxxhdrs',
+                           command=hdrs_command,
+                           description='CXX HDRS ${in}',
+                           depfile=None)
+
+    def _generate_windows_ar_rules(self):
+        """Generate Windows static library rules."""
+        ar = self.build_accelerator.get_ar_command()
+        self.generate_rule(name='ar',
+                           command=f'{ar} /nologo /out:${{out}} ${{in}}',
+                           description='LIB ${out}')
+
+    def _generate_windows_link_rules(self):
+        """Generate Windows linking rules."""
+        _, _, ld = self.build_accelerator.get_cc_commands()
+        windows_config = config.get_section('msvc_config')
+        cc_config = config.get_section('cc_config')
+        # Combine windows_config linkflags with filtered cc_config linkflags
+        linkflags = (windows_config['linkflags'] +
+                     self.build_toolchain.filter_cc_flags(cc_config['linkflags']))
+
+        # System library paths (MSVC + Windows SDK) discovered by the toolchain
+        lib_paths = self.build_toolchain.get_system_lib_paths()
+        def _libpath_flag(p):
+            if ' ' in p:
+                return '/LIBPATH:"%s"' % p
+            return '/LIBPATH:%s' % p
+        libpath_flags = ' '.join([_libpath_flag(p) for p in lib_paths])
+
+        self._add_line('linkflags = %s\n' % ' '.join(linkflags))
+
+        self.generate_rule(name='link',
+                           command=f'{ld} /nologo /out:${{out}} ${{linkflags}} {libpath_flags} ${{target_linkflags}} ${{extra_linkflags}} ${{in}}',
+                           description='LINK EXE ${out}')
+
+        self.generate_rule(name='solink',
+                           command=f'{ld} /nologo /DLL /out:${{out}} ${{linkflags}} {libpath_flags} ${{target_linkflags}} ${{extra_linkflags}} ${{in}}',
+                           description='LINK DLL ${out}')
 
     def _generate_cc_vars(self):
         warnings, cxx_warnings, c_warnings, cu_warnings = self._get_warning_flags()
@@ -393,22 +515,22 @@ class _NinjaFileHeaderGenerator:
                 protocpythonpluginflags =
                 '''))
         self.generate_rule(name='proto',
-                           command='%s --proto_path=. %s -I=`dirname ${in}` '
+                           command='%s --proto_path=. %s -I=${srcdir} '
                                    '--cpp_out=%s ${protocflags} ${protoccpppluginflags} ${in}' % (
                                        protoc, protobuf_incs, self.build_dir),
                            description='PROTOC CPP ${in}')
         self.generate_rule(name='protojava',
-                           command='%s --proto_path=. %s --java_out=%s/`dirname ${in}` '
+                           command='%s --proto_path=. %s --java_out=%s/${srcdir} '
                                    '${protocjavapluginflags} ${in}' % (
                                        protoc_java, protobuf_java_incs, self.build_dir),
                            description='PROTOC JAVA ${in}')
         self.generate_rule(name='protopython',
-                           command='%s --proto_path=. %s -I=`dirname ${in}` '
+                           command='%s --proto_path=. %s -I=${srcdir} '
                                    '--python_out=%s ${protocpythonpluginflags} ${in}' % (
                                        protoc, protobuf_incs, self.build_dir),
                            description='PROTOC PYTHON ${in}')
         self.generate_rule(name='protodescriptors',
-                           command='%s --proto_path=. %s -I=`dirname ${first}` '
+                           command='%s --proto_path=. %s -I=${srcdir} '
                                    '--descriptor_set_out=${out} --include_imports '
                                    '--include_source_info ${in}' % (
                                        protoc, protobuf_incs),
@@ -430,20 +552,18 @@ class _NinjaFileHeaderGenerator:
             else:
                 go_out = outdir
             self.generate_rule(name='protogo',
-                               command='%s --proto_path=. %s -I=`dirname ${in}` '
+                               command='%s --proto_path=. %s -I=${srcdir} '
                                        '--plugin=protoc-gen-go=%s --go_out=%s ${in}' % (
                                            protoc, protobuf_incs, protoc_go_plugin, go_out),
                                description='PROTOCGOLANG ${in}')
 
     def generate_resource_rules(self):
-        args = '${name} ${path} ${out} ${in}'
         self.generate_rule(name='resource_index',
-                           command=self._builtin_command('resource_index', args),
+                           command=self._builtin_command('resource_index',
+                                                         '${name} ${path} ${out} ${in}'),
                            description='RESOURCE INDEX ${out}')
         self.generate_rule(name='resource',
-                           command='xxd -i ${in} | '
-                                   'sed -e "s/^unsigned char /const char RESOURCE_/g" '
-                                   '-e "s/^unsigned int /const unsigned int RESOURCE_/g" > ${out}',
+                           command=self._builtin_command('resource', '${out} ${in}'),
                            description='RESOURCE ${in}')
 
     def get_java_command(self, java_config, cmd):
@@ -482,12 +602,24 @@ class _NinjaFileHeaderGenerator:
                 javacflags =
                 '''))
         jarflags = 'cf' + config.get_item('java_config', 'jar_compression_level')
+        if os.name == 'nt':
+            javac_opts = ''
+            if source_version:
+                javac_opts += f'-source {source_version} '
+            if target_version:
+                javac_opts += f'-target {target_version} '
+            command = self._builtin_command('javac_compile',
+                                            f'${{classes_dir}} ${{out}} ${{source_encoding}} '
+                                            f'${{classpath}} {javac_opts}${{javacflags}} -- ${{in}}')
+        else:
+            command = ('rm -fr ${classes_dir} && mkdir -p ${classes_dir} && '
+                       '%s && sleep 0.01 && '
+                       '%s %s ${out} -C ${classes_dir} .' % (
+                           ' '.join(cmd), jar, jarflags))
         self.generate_rule(name='javac',
-                           command='rm -fr ${classes_dir} && mkdir -p ${classes_dir} && '
-                                   '%s && sleep 0.01 && '
-                                   '%s %s ${out} -C ${classes_dir} .' % (
-                                       ' '.join(cmd), jar, jarflags),
-                           description='JAVAC ${out}')
+                           command=command,
+                           description='JAVAC ${out}',
+                           restat=True)
 
     def generate_java_resource_rules(self):
         self.generate_rule(name='javaresource',
@@ -500,7 +632,8 @@ class _NinjaFileHeaderGenerator:
         args = f'{jar} --compression_level={level} ${{out}} ${{in}}'
         self.generate_rule(name='javajar',
                            command=self._builtin_command('java_jar', args),
-                           description='JAVA JAR ${out}')
+                           description='JAVA JAR ${out}',
+                           restat=True)
 
     def generate_java_test_rules(self):
         jacocoagent = self.get_jacocoagent()
@@ -508,7 +641,8 @@ class _NinjaFileHeaderGenerator:
                 '--packages_under_test=${packages_under_test} ${in}') % jacocoagent
         self.generate_rule(name='javatest',
                            command=self._builtin_command('java_test', args),
-                           description='JAVA TEST ${out}')
+                           description='JAVA TEST ${out}',
+                           restat=True)
 
     def generate_fatjar_rules(self, java_config):
         conflict_severity = java_config.get('fat_jar_conflict_severity', 'warning')
@@ -644,12 +778,37 @@ class _NinjaFileHeaderGenerator:
                            description='SHELL TEST DATA ${out}')
 
     def generate_lex_yacc_rules(self):
+        if os.name == 'nt':
+            lex_cmd = 'win_flex --wincompat'
+            yacc_cmd = 'win_bison'
+            # win_bison may be invoked via WinGet Links hardlink, which causes
+            # bison to look for data/m4sugar/ next to the link instead of the
+            # real install dir. Set BISON_PKGDATADIR to the actual data dir.
+            bison_data_dir = self._find_win_bison_data_dir()
+            if bison_data_dir:
+                yacc_cmd = f'cmd /c set "BISON_PKGDATADIR={bison_data_dir}" && win_bison'
+        else:
+            lex_cmd = 'flex'
+            yacc_cmd = 'bison'
         self.generate_rule(name='lex',
-                           command='flex ${lexflags} -o ${out} ${in}',
+                           command=f'{lex_cmd} ${{lexflags}} -o ${{out}} ${{in}}',
                            description='LEX ${in}')
         self.generate_rule(name='yacc',
-                           command='bison ${yaccflags} -o ${out} ${in}',
+                           command=f'{yacc_cmd} ${{yaccflags}} -o ${{out}} ${{in}}',
                            description='YACC ${in}')
+
+    @staticmethod
+    def _find_win_bison_data_dir():
+        for pattern in [
+            os.path.join(os.path.dirname(shutil.which('win_bison') or ''), 'data'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''),
+                         'Microsoft', 'WinGet', 'Packages',
+                         'WinFlexBison*', 'data'),
+        ]:
+            matches = glob.glob(pattern)
+            if matches and os.path.isdir(matches[0]):
+                return matches[0]
+        return None
 
     def generate_package_rules(self):
         args = '${out} ${in} ${entries}'
@@ -681,13 +840,20 @@ class _NinjaFileHeaderGenerator:
                   profile = %s
                   compiler = %s
                 ''') % (scm, revision, url, self.options.profile, f'{cc} {cc_version}'))
+        scm_obj = self.build_toolchain.object_file_of(scm)
         self._add_line(textwrap.dedent('''\
                 build %s: cxx %s
                   cppflags = -w -O2
                   cxx_warnings =
-                ''') % (scm + '.o', scm))
+                ''') % (scm_obj, scm))
 
     def generate_cuda_rules(self):
+        if self.build_toolchain.cc_is('msvc'):
+            self._generate_msvc_cuda_rules()
+        else:
+            self._generate_gcc_cuda_rules()
+
+    def _generate_gcc_cuda_rules(self):
         nvcc_cmd = '${cmd}'
 
         cc_config = config.get_section('cc_config')
@@ -705,7 +871,7 @@ class _NinjaFileHeaderGenerator:
         template = self._cc_compile_command_wrapper_template('${out}.H', cuda=True)
 
         _, cxx, _ = self.build_accelerator.get_cc_commands()
-        cu_command = '%s -ccbin %s -o ${out} -MMD -MF ${out}.d ' \
+        cu_command = '%s -ccbin "%s" -o ${out} -MMD -MF ${out}.d ' \
             '-Xcompiler -fPIC %s %s %s ${optimize} ${cu_warnings} ' \
             '%s ${includes} ${cppflags} ${cuflags} -c ${in}' % (
                 nvcc_cmd, cxx, ' '.join(cxxflags), ' '.join(cppflags),
@@ -735,10 +901,92 @@ class _NinjaFileHeaderGenerator:
             rspfile_content='${target_linkflags} ${in}',
             description='CUDA LINK SHARED ${out}')
 
+    def _generate_msvc_cuda_rules(self):
+        """Generate CUDA rules for MSVC host compiler on Windows.
+
+        NVCC on Windows delegates host code to cl.exe.  Flags that pass
+        through to the host compiler via -Xcompiler must be MSVC-compatible.
+        """
+        nvcc_cmd = '${cmd}'
+
+        cc_config = config.get_section('cc_config')
+        ms_config = config.get_section('msvc_config')
+        cuda_config = config.get_section('cuda_config')
+
+        # Build MSVC-compatible host compiler flags, filtered through the
+        # toolchain so that GCC-isms from cc_config get mapped or dropped.
+        filtered_cppflags = self.build_toolchain.filter_cc_flags(cc_config['cppflags'])
+        filtered_cxxflags = self.build_toolchain.filter_cc_flags(cc_config['cxxflags'], 'c++')
+        cppflags = ms_config['cppflags'] + filtered_cppflags
+        cxxflags = ms_config['cxxflags'] + filtered_cxxflags
+
+        # NVCC's cudafe++ (which preprocesses host code before MSVC) has a
+        # limited C++ STL understanding.  /EHsc and /std:c++17 pull in STL
+        # internal headers (e.g. xtr1common) that trigger an assertion in
+        # cudafe++ — this is an NVCC limitation, not an MSVC version issue.
+        cppflags = [f for f in cppflags if not f.startswith('/EH')]
+        cxxflags = [f for f in cxxflags if not f.startswith('/EH')]
+        cppflags = [f for f in cppflags if not f.startswith('/std:')]
+        cxxflags = [f for f in cxxflags if not f.startswith('/std:')]
+
+        # -Xcompiler passes flags to the host compiler (cl.exe); NVCC
+        # itself understands -I / -D / etc. natively.
+        host_cppflags = ' '.join('-Xcompiler %s' % f for f in cppflags)
+        host_cxxflags = ' '.join('-Xcompiler %s' % f for f in cxxflags)
+
+        cuflags = cuda_config['cuflags']
+        system_includes = self.build_toolchain.get_system_include_paths()
+        includes = system_includes + cc_config['extra_incs'] + ['.', self.build_dir]
+        # NVCC uses -I natively, same across platforms.
+        # Quote paths with spaces so nvcc parses them as a single argument.
+        def _quote_if_needed(p):
+            return '-I"%s"' % p if ' ' in p else '-I%s' % p
+        include_flags = ' '.join(_quote_if_needed(inc) for inc in includes)
+
+        # NVCC -Xcompiler /showIncludes lets Ninja deps=msvc track headers.
+        _, cxx, _ = self.build_accelerator.get_cc_commands()
+        cu_command = ('%s -ccbin "%s" -o ${out} -c '
+                      '-Xcompiler /nologo -Xcompiler /showIncludes '
+                      '%s %s %s '
+                      '%s ${includes} %s ${cu_warnings} ${in}' % (
+                          nvcc_cmd, cxx,
+                          host_cppflags, host_cxxflags,
+                          ' '.join(cuflags),
+                          include_flags, '${cppflags}'))
+        self.generate_rule(
+            name='cudacc',
+            command=cu_command,
+            description='CUDA LIBRARY ${in}',
+            deps='msvc',
+        )
+
+        # NVCC linking delegates to the host linker automatically.
+        # Include -ccbin so nvcc can find cl.exe even without a VS dev shell.
+        link_args = ('-o ${out} %s ${cppflags} '
+                     '--options-file ${out}.rsp ${extra_linkflags}' % include_flags)
+        self.generate_rule(
+            name='cudalink',
+            command=nvcc_cmd + ' -ccbin "%s" ' % cxx + link_args,
+            rspfile='${out}.rsp',
+            rspfile_content='${target_linkflags} ${in}',
+            description='CUDA LINK BINARY ${out}')
+
+        self.generate_rule(
+            name='cudasolink',
+            command=nvcc_cmd + ' -ccbin "%s" -shared ' % cxx + link_args,
+            rspfile='${out}.rsp',
+            rspfile_content='${target_linkflags} ${in}',
+            description='CUDA LINK SHARED ${out}')
+
     def _builtin_command(self, builder, args=''):
-        cmd = ['PYTHONPATH=%s:$$PYTHONPATH' % self.blade_path]
         python = os.environ.get('BLADE_PYTHON_INTERPRETER') or sys.executable
-        cmd.append(f'{python} -m blade.builtin_tools {builder}')
+        if os.name == 'nt':
+            # On Windows, PYTHONPATH uses ';' and cmd.exe must be explicit
+            python_cmd = f'set PYTHONPATH={self.blade_path};%PYTHONPATH% && {python} -m blade.builtin_tools {builder}'
+            cmd = ['cmd /c', python_cmd]
+        else:
+            cmd = ['PYTHONPATH=%s:$$PYTHONPATH' % self.blade_path]
+            cmd.append(f'{python} -m blade.builtin_tools {builder}')
         if args:
             cmd.append(args)
         else:
@@ -795,5 +1043,5 @@ class NinjaFileGenerator:
     def generate_build_script(self):
         """Generate build script for underlying build system."""
         code = self.generate_build_code()
-        with open(self.script_path, 'w') as script:
+        with open(self.script_path, 'w', encoding='utf-8') as script:
             script.writelines(code)

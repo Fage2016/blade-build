@@ -267,6 +267,34 @@ class BladeConfig:
                 'thrift_gen_params': 'cpp:include_prefix,pure_enums'
             },
 
+            'msvc_config': {
+                '__help__': 'MSVC-specific Configuration',
+                'target_arch': 'auto',
+                'target_arch__help__':
+                    'Target architecture: auto (detect from host), x64, x86, arm64, arm64ec',
+                'msvc_version': 'auto',
+                'msvc_version__help__': 'MSVC compiler version prefix (auto, 14.44, 14.51, ...)',
+                'windows_sdk': 'auto',
+                'windows_sdk__help__': 'Windows SDK version (auto, 10.0, etc.)',
+                'visual_studio': 'auto',
+                'visual_studio__help__': 'Visual Studio edition (auto, Community, Professional, Enterprise)',
+                'cppflags': ['/MD', '/EHsc'],
+                'cflags': [],
+                'cxxflags': ['/std:c++17'],
+                'linkflags': ['/SUBSYSTEM:CONSOLE'],
+                'warnings': ['/W3'],
+                'optimize': {
+                    'debug': ['/Od'],
+                    'release': ['/O2'],
+                },
+                'debug_info_levels': {
+                    'no': [],
+                    'low': ['/Zi'],
+                    'mid': ['/Zi', '/DEBUG'],
+                    'high': ['/Zi', '/DEBUG', '/RTC1'],
+                },
+            },
+
         }
 
     def info(self, msg):
@@ -630,5 +658,13 @@ def fbthrift_library_config(append=None, **kwargs):
     # cause a NameError during config parsing. All arguments are
     # silently ignored.
     pass
+
+
+@config_rule
+def msvc_config(append=None, **kwargs):
+    """msvc_config section. No-op on non-Windows platforms."""
+    if os.name != 'nt':
+        return
+    _blade_config.update_config('msvc_config', append, kwargs)
 
 

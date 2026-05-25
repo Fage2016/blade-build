@@ -21,6 +21,7 @@ from typing import Any
 from blade import build_manager
 from blade import build_rules
 from blade import config  # lgtm[py/cyclic-import]
+from blade import console
 from blade import inclusion_check
 from blade.blade_types import StrOrListOpt
 from blade.constants import HEAP_CHECK_VALUES
@@ -158,14 +159,9 @@ def need_dwp():
     return config.get_item('cc_config', 'dwp')
 
 
-def _cc_plugin_default_prefix_suffix() -> tuple[str, str]:
-    """Default (prefix, suffix) for cc_plugin output file names.
-
-    Currently fixed to ('lib', '.so') because blade only supports Linux as a
-    build target. When cross-platform support lands, derive these from the
-    active toolchain (macOS: ('lib', '.dylib'); Windows: ('', '.dll')).
-    """
-    return ('lib', '.so')
+def _cc_plugin_default_prefix_suffix(toolchain) -> tuple[str, str]:
+    """Default (prefix, suffix) for cc_plugin output file names."""
+    return (toolchain.lib_prefix, toolchain.dynamic_lib_suffix)
 
 
 class CcTarget(Target):
@@ -485,6 +481,8 @@ class CcTarget(Target):
             return []
         if sys.platform == 'darwin':
             return ['-Wl,-force_load,' + lib for lib in libs]
+        if os.name == 'nt':
+            return ['/WHOLEARCHIVE:' + lib for lib in libs]
         return ['-Wl,--whole-archive'] + libs + ['-Wl,--no-whole-archive']
 
     def _dynamic_dependencies(self):
@@ -495,16 +493,23 @@ class CcTarget(Target):
         targets = self.blade.get_build_targets()
         sys_libs, usr_libs = [], []
         incchk_deps = []
+        tc = self.blade.get_build_toolchain()
         assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for key in self.expanded_deps:
             dep = targets[key]
             if dep.path == '#':
-                sys_libs.append(dep.name)
+                sys_libs.append(getattr(dep, 'libpath', dep.name))
                 continue
 
-            lib = dep._get_target_file('so')
+            lib = dep._get_target_file(tc.DYNAMIC_LIB_LABEL)
             if lib:
                 usr_libs.append(lib)
+                continue
+
+            # Windows .res files from windows_resources deps (CcInfo-like propagation)
+            res_files = dep.data.get('res_files', [])
+            if res_files:
+                usr_libs.extend(res_files)
                 continue
 
             # '.so' file is not generated for header only libraries, use this file as implicit dep.
@@ -524,19 +529,26 @@ class CcTarget(Target):
         targets = self.blade.get_build_targets()
         sys_libs, usr_libs, link_all_symbols_libs = [], [], []
         incchk_deps = []
+        tc = self.blade.get_build_toolchain()
         assert self.expanded_deps is not None, 'expanded_deps not expanded'
         for key in self.expanded_deps:
             dep = targets[key]
             if dep.path == '#':
-                sys_libs.append(dep.name)
+                sys_libs.append(getattr(dep, 'libpath', dep.name))
                 continue
 
-            lib = dep._get_target_file('a')
+            lib = dep._get_target_file(tc.STATIC_LIB_LABEL)
             if lib:
                 if dep.attr.get('link_all_symbols'):
                     link_all_symbols_libs.append(lib)
                 else:
                     usr_libs.append(lib)
+                continue
+
+            # Windows .res files from windows_resources deps (CcInfo-like propagation)
+            res_files = dep.data.get('res_files', [])
+            if res_files:
+                usr_libs.extend(res_files)
                 continue
 
             # '.a' file is not generated for header only libraries, use this file as implicit dep.
@@ -612,7 +624,7 @@ class CcTarget(Target):
             # to avoid file missing error
             if secret and path_under_dir(full_src, self.build_dir):
                 self.generate_build('phony', full_src, inputs=[], clean=[])
-            obj = os.path.join(objs_dir, src + '.o')
+            obj = os.path.join(objs_dir, self.blade.get_build_toolchain().object_file_of(src))
             rule = self._get_rule_from_suffix(src, secret)
             self.generate_build(rule, obj, inputs=full_src,
                                 implicit_deps=implicit_deps,
@@ -634,8 +646,6 @@ class CcTarget(Target):
     def _generate_inclusion_check(self, objs_dir, objs, vars, order_only_deps):
         implicit_deps = objs[:]
         # Generate inclusion stack file for header files.
-        # The source file does not need to generate this file separately, because it is generated
-        # at the same time during compilation.
         for hdr, full_hdr in self.attr['expanded_hdrs']:
             if path_under_dir(full_hdr, self.build_dir):  # Don't check generated header files
                 continue
@@ -643,6 +653,17 @@ class CcTarget(Target):
             implicit_deps.append(output)
             self.generate_build('cxxhdrs', output, inputs=full_hdr,
                                 order_only_deps=order_only_deps, variables=vars, clean=[])
+        # MSVC does not generate .H files during compilation (unlike GCC's -H wrapper),
+        # so we need an explicit cxxhdrs preprocess step for source files too.
+        tc = self.blade.get_build_toolchain()
+        if tc.obj_suffix != '.o':
+            for src, full_src in self.attr['expanded_srcs']:
+                if path_under_dir(full_src, self.build_dir):
+                    continue
+                output = os.path.join(objs_dir, src + tc.obj_suffix + '.H')
+                implicit_deps.append(output)
+                self.generate_build('cxxhdrs', output, inputs=full_src,
+                                    order_only_deps=order_only_deps, variables=vars, clean=[])
 
         check_info_file = self.data['inclusion_check_info_file']
         check_result_file = check_info_file + '.result'
@@ -652,23 +673,27 @@ class CcTarget(Target):
         return check_result_file
 
     def _static_cc_library(self, objs, inclusion_check_result):
-        output = self._target_file_path('lib%s.a' % self.name)
+        tc = self.blade.get_build_toolchain()
+        output = self._target_file_path(tc.static_library_name(self.name))
         self.generate_build('ar', output, inputs=objs,
                             order_only_deps=inclusion_check_result)
-        self._add_default_target_file('a', output)
+        self._add_default_target_file(tc.STATIC_LIB_LABEL, output)
 
     def _dynamic_cc_library(self, objs, inclusion_check_result):
-        output = self._target_file_path('lib%s.so' % self.name)
+        tc = self.blade.get_build_toolchain()
+        output = self._target_file_path(tc.dynamic_library_name(self.name))
         target_linkflags = self._generate_link_flags()
         sys_libs, usr_libs, incchk_deps = self._dynamic_dependencies()
         if inclusion_check_result:
             incchk_deps.append(inclusion_check_result)
         self._cc_link(output, 'solink', objs=objs, deps=usr_libs, sys_libs=sys_libs,
                       order_only_deps=incchk_deps, target_linkflags=target_linkflags)
-        self._add_target_file('so', output)
+        self._add_target_file(tc.DYNAMIC_LIB_LABEL, output)
 
     def _soname_of(self, so_path):
         """Get the `soname` of a shared library."""
+        if os.name == 'nt':
+            return None  # Windows DLLs don't have ELF-style soname
         returncode, output, unused_stderr = run_command(['objdump', '-p', so_path])
         if returncode != 0:
             return None
@@ -694,7 +719,7 @@ class CcTarget(Target):
             vars['target_linkflags'] = ' '.join(target_linkflags)
         if cmd:
             vars['cmd'] = cmd
-        extra_linkflags = ['-l%s' % lib for lib in sys_libs]
+        extra_linkflags = [lib if os.path.isabs(lib) else '-l%s' % lib for lib in sys_libs]
         extra_linkflags += self.attr.get('extra_linkflags')  # pyright: ignore[reportOperatorIssue]
         if implicit_deps is None:
             implicit_deps = []
@@ -990,8 +1015,9 @@ class PrebuiltCcLibrary(CcTarget):
         # If there is only one kind of library, we have to use it any way.
         # But in the third case, we use static library for static linking,
         # and use dynamic library for dynamic linking.
-        static_source = self._library_source_path('a')
-        dynamic_source = self._library_source_path('so')
+        tc = self.blade.get_build_toolchain()
+        static_source = self._library_source_path(tc.static_lib_suffix)
+        dynamic_source = self._library_source_path(tc.dynamic_lib_suffix)
         has_static = os.path.exists(static_source)
         has_dynamic = os.path.exists(dynamic_source)
 
@@ -1001,16 +1027,16 @@ class PrebuiltCcLibrary(CcTarget):
 
         if has_static:
             self.attr['static_source'] = static_source
-            self._add_target_file('a', static_source)
+            self._add_target_file(tc.STATIC_LIB_LABEL, static_source)
             if not has_dynamic:
                 # Using static library for dynamic linking
-                self._add_target_file('so', static_source)
+                self._add_target_file(tc.DYNAMIC_LIB_LABEL, static_source)
 
         if has_dynamic:
             dynamic_target = self._target_file_path(os.path.basename(dynamic_source))
             self.attr['dynamic_source'] = dynamic_source
             self.attr['dynamic_target'] = dynamic_target
-            self._add_target_file('so', dynamic_target)
+            self._add_target_file(tc.DYNAMIC_LIB_LABEL, dynamic_target)
 
             soname = self._soname_of(dynamic_source)
             if soname:
@@ -1018,7 +1044,7 @@ class PrebuiltCcLibrary(CcTarget):
 
             if not has_static:
                 # Using dynamic library for static linking
-                self._add_target_file('a', dynamic_target)
+                self._add_target_file(tc.STATIC_LIB_LABEL, dynamic_target)
 
     _default_libpath = None
 
@@ -1041,7 +1067,8 @@ class PrebuiltCcLibrary(CcTarget):
 
         libpath = os.path.join(self.path, libpath)
 
-        return os.path.join(libpath, f'lib{self.name}.{suffix}')
+        tc = self.blade.get_build_toolchain()
+        return os.path.join(libpath, f'{tc.lib_prefix}{self.name}{suffix}')
 
     def _is_depended(self):
         """Does this library really be used"""
@@ -1053,7 +1080,8 @@ class PrebuiltCcLibrary(CcTarget):
         return False
 
     def _rpath_link(self, dynamic):
-        path = self._library_source_path('so')
+        path = self._library_source_path(
+            self.blade.get_build_toolchain().dynamic_lib_suffix)
         if os.path.exists(path):
             return os.path.dirname(path)
         return None
@@ -1262,18 +1290,21 @@ class ForeignCcLibrary(CcTarget):
             hdr_dir = self._target_file_path(hdr_dir)
             self.attr['generated_incs'] = [hdr_dir]
 
-    def _library_full_path(self, type):
-        """Return full path of the library file with specified type"""
-        assert type in ('a', 'so')
-        return self._target_file_path(os.path.join(self.attr['install_dir'], self.attr['lib_dir'],
-                                                   f'lib{self.name}.{type}'))
+    def _library_full_path(self, suffix):
+        """Return full path of the library file with specified suffix"""
+        tc = self.blade.get_build_toolchain()
+        assert suffix in tc.all_dynamic_lib_suffixes + (tc.static_lib_suffix,), suffix
+        return self._target_file_path(os.path.join(
+            self.attr['install_dir'], self.attr['lib_dir'],
+            f'{tc.lib_prefix}{self.name}{suffix}'))
 
     def soname_and_full_path(self):
         """Return soname and full path of the shared library, if any"""
         if 'soname_and_full_path' not in self.data:
             self.data['soname_and_full_path'] = None
             if self.attr['has_dynamic']:
-                so_path = self._library_full_path('so')
+                tc = self.blade.get_build_toolchain()
+                so_path = self._library_full_path(tc.dynamic_lib_suffix)
                 soname = self._soname_of(so_path)
                 if soname:
                     self.data['soname_and_full_path'] = (soname, so_path)
@@ -1285,11 +1316,13 @@ class ForeignCcLibrary(CcTarget):
         self._check_binary_link_only()
 
     def _ninja_rules(self):
-        a_path = self._library_full_path('a')
-        so_path = self._library_full_path('so')
+        tc = self.blade.get_build_toolchain()
+        a_path = self._library_full_path(tc.static_lib_suffix)
+        so_path = self._library_full_path(tc.dynamic_lib_suffix)
 
-        self._add_default_target_file('a', a_path)
-        self._add_target_file('so', so_path if self.attr['has_dynamic'] else a_path)
+        self._add_default_target_file(tc.STATIC_LIB_LABEL, a_path)
+        self._add_target_file(tc.DYNAMIC_LIB_LABEL,
+                              so_path if self.attr['has_dynamic'] else a_path)
 
     def generate(self):
         """Generate build code for cc object/library."""
@@ -1475,10 +1508,12 @@ class CcBinary(CcTarget):
             order_only_deps.append(inclusion_check_result)
 
         if self.attr['embed_version']:
-            scm = os.path.join(self.build_dir, 'scm.cc.o')
+            scm = self.blade.get_build_toolchain().object_file_of(
+                os.path.join(self.build_dir, 'scm.cc'))
             objs.append(scm)
             order_only_deps.append(scm)
-        output = self._target_file_path(self.name)
+        output = self._target_file_path(
+            self.blade.get_build_toolchain().executable_file_name(self.name))
         self._cc_link(output, 'link', objs=objs, deps=usr_libs, sys_libs=sys_libs,
                       linker_scripts=self.attr.get('lds_fullpath'),
                       version_scripts=self.attr.get('vers_fullpath'),
@@ -1494,6 +1529,9 @@ class CcBinary(CcTarget):
     def _generate_dwp(self, binary_path, objs, implicit_deps, order_only_deps):
         """Generate dwp file."""
         if not is_fission():
+            return
+        if not self.blade.get_build_toolchain().cc_is('gcc'):
+            console.warning('fission/dwp is not supported on this toolchain, skipping')
             return
 
         _, usr_libs, link_all_symbols_libs, _ = self._static_dependencies()
@@ -1648,7 +1686,8 @@ class CcPlugin(CcTarget):
         # under the new rules it would produce e.g. 'libfoo.so.so'. Warn the
         # user so they can switch to the documented `prefix=''` / `suffix=''`
         # spelling instead.
-        if (name.endswith(('.so', '.dylib', '.dll'))
+        tc = self.blade.get_build_toolchain()
+        if (name.endswith(tc.all_dynamic_lib_suffixes)
                 and prefix is None and suffix is None):
             self.warning(
                 f"cc_plugin name='{name}' ends in a shared-library extension; "
@@ -1681,7 +1720,8 @@ class CcPlugin(CcTarget):
         # toolchain defaults when either is left as None. See
         # :func:`_cc_plugin_default_prefix_suffix` for the cross-platform
         # defaults.
-        default_prefix, default_suffix = _cc_plugin_default_prefix_suffix()
+        default_prefix, default_suffix = _cc_plugin_default_prefix_suffix(
+            self.blade.get_build_toolchain())
         prefix = default_prefix if self.attr['prefix'] is None else self.attr['prefix']
         suffix = default_suffix if self.attr['suffix'] is None else self.attr['suffix']
         output = self._target_file_path(f'{prefix}{self.name}{suffix}')
@@ -1698,8 +1738,11 @@ class CcPlugin(CcTarget):
                           target_linkflags=target_linkflags,
                           implicit_deps=link_all_symbols_libs, order_only_deps=incchk_deps)
             if self.attr['strip']:
-                self.generate_build('strip', output, inputs=link_output)
-            self._add_default_target_file('so', output)
+                if self.blade.get_build_toolchain().cc_is('gcc'):
+                    self.generate_build('strip', output, inputs=link_output)
+                else:
+                    console.notice('strip is not supported on this toolchain, skipping')
+            self._add_default_target_file(self.blade.get_build_toolchain().DYNAMIC_LIB_LABEL, output)
 
 
 def cc_plugin(
