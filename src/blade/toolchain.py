@@ -126,6 +126,8 @@ class ToolChain:
     ar: str
     cc_version: str
     _cc_vendor: str
+    _kind: str
+    _target: str
 
     # ------------------------------------------------------------------
     # Target file labels — internal keys used by cc_targets to register
@@ -161,6 +163,11 @@ class ToolChain:
         return 'lib'
 
     @property
+    def exe_suffix(self) -> str:
+        """Executable file suffix ('' / '.exe')."""
+        return ''
+
+    @property
     def all_dynamic_lib_suffixes(self) -> tuple[str, ...]:
         """All dynamic-library suffixes across supported platforms.
 
@@ -171,11 +178,12 @@ class ToolChain:
     def __init__(self):
         pass
 
-    @staticmethod
-    def _get_cc_command(env, default):
-        """Get a cc command.
+    def tool(self, key):
+        """Return tool path for *key*, or ``None`` if not available.
+
+        Supported keys: ``'cc'``, ``'cxx'``, ``'ld'``, ``'ar'``, ``'rc'``, ``'as'``.
         """
-        return os.path.join(os.environ.get('TOOLCHAIN_DIR', ''), os.environ.get(env, default))  # pyright: ignore[reportCallIssue, reportArgumentType]
+        return getattr(self, '_tools', {}).get(key)
 
     def _get_cc_version(self):
         version = ''
@@ -218,8 +226,9 @@ class ToolChain:
 
     @staticmethod
     def get_cc_target_arch():
-        """Get the cc target architecture."""
-        cc = ToolChain._get_cc_command('CC', 'gcc')
+        """Get the cc target architecture (auto-detect from system compiler)."""
+        import shutil
+        cc = shutil.which('gcc') or 'gcc'
         returncode, stdout, stderr = run_command([cc, '-dumpmachine'])
         if returncode == 0:
             return stdout.strip()
@@ -259,7 +268,7 @@ class ToolChain:
 
     def executable_file_name(self, name):
         """Return the executable output name for a given target name."""
-        return name
+        return name + self.exe_suffix
 
     @property
     def deps_style(self):
@@ -270,17 +279,6 @@ class ToolChain:
     def uses_depfile(self):
         """Whether the compiler generates a .d depfile."""
         return True
-
-    def supports_resource_compilation(self):
-        """Whether the toolchain can compile Windows .rc resource files."""
-        return False
-
-    def get_resource_compiler(self):
-        """Return path to the Windows Resource Compiler (``rc.exe``).
-
-        Only meaningful when ``supports_resource_compilation()`` returns
-        ``True``; callers must guard accordingly."""
-        return 'rc'  # let it fail if called unsafely
 
     def get_system_include_paths(self):
         """Return system include paths, or empty list if not applicable."""
@@ -343,20 +341,45 @@ class ToolChain:
 
 
 class GccToolChain(ToolChain):
-    """GCC/Clang toolchain for Linux and macOS builds."""
+    """GCC/Clang/MinGW/Cygwin toolchain (all GCC-family compilers)."""
 
-    def __init__(self):
+    def __init__(self, kind='gcc', cc='', cxx='', ld='', ar='',
+                 target='', prefix='', tool_prefix=''):
         super().__init__()
-        self.cc = self._get_cc_command('CC', 'gcc')
-        self.cxx = self._get_cc_command('CXX', 'g++')
-        self.ld = self._get_cc_command('LD', 'g++')
+        self._kind = kind
+        self._target = target or _default_target_for_kind(kind)
+
+        self.cc = cc or _resolve_tool(prefix, tool_prefix, 'gcc')
+        self.cxx = cxx or _resolve_tool(prefix, tool_prefix, 'g++')
+        self.ld = ld or _resolve_tool(prefix, tool_prefix, 'g++')
+        self.ar = ar or _resolve_tool(prefix, tool_prefix, 'ar')
         self.cc_version = self._get_cc_version()
-        self.ar = self._get_cc_command('AR', 'ar')
         self._cc_vendor = self._detect_cc_vendor()
+
+        self._tools = {
+            'cc': self.cc,
+            'cxx': self.cxx,
+            'ld': self.ld,
+            'ar': self.ar,
+            'rc': 'windres' if self._target == 'windows' else None,
+            'as': None,
+        }
 
     @property
     def dynamic_lib_suffix(self) -> str:
-        return '.dylib' if sys.platform == 'darwin' else '.so'
+        if self._target == 'darwin':
+            return '.dylib'
+        if self._target == 'windows':
+            return '.dll'
+        return '.so'
+
+    @property
+    def lib_prefix(self) -> str:
+        return '' if self._target == 'windows' else 'lib'
+
+    @property
+    def exe_suffix(self) -> str:
+        return '.exe' if self._target == 'windows' else ''
 
 
 class MsvcToolChain(ToolChain):
@@ -401,17 +424,18 @@ class MsvcToolChain(ToolChain):
         if self._msvc_path and not self._has_tool_for_target('cl', self._msvc_target):
             fallback = self._find_available_target()
             if fallback:
-                console.warning(
+                console.info(
                     'MSVC has no %s-targeting compiler on this host; '
-                    'falling back to target_arch=%s. '
-                    'Set msvc_config.target_arch explicitly to suppress '
-                    'this warning.' % (self._msvc_target, fallback))
+                    'falling back to target_arch=%s.' % (self._msvc_target, fallback))
                 self._msvc_target = fallback
                 # Update target_arch to stay consistent
                 for k, v in self._ARCH_MAP.items():
                     if v['msvc_dir'] == fallback:
                         self.target_arch = k
                         break
+
+        self._kind = 'msvc'
+        self._target = 'windows'
 
         # Tool commands
         self.cc = self._get_msvc_command('cl')
@@ -420,6 +444,26 @@ class MsvcToolChain(ToolChain):
         self.ar = self._get_msvc_command('lib')
         self.cc_version = self._get_msvc_version()
         self._cc_vendor = 'msvc'
+
+        # Resolve assembler — same directory as cl.exe
+        asm_tool = None
+        if self._msvc_path:
+            for host in (self._msvc_host, 'Hostx64', 'Hostx86'):
+                asm_exe = os.path.join(self._msvc_path, 'bin', host,
+                                       self._msvc_target,
+                                       'ml64.exe' if self.target_arch == 'x64' else 'ml.exe')
+                if os.path.exists(asm_exe):
+                    asm_tool = asm_exe
+                    break
+
+        self._tools = {
+            'cc': self.cc,
+            'cxx': self.cxx,
+            'ld': self.ld,
+            'ar': self.ar,
+            'rc': self.get_resource_compiler(),
+            'as': asm_tool,
+        }
 
     # ------------------------------------------------------------------
     # Architecture resolution
@@ -686,9 +730,6 @@ class MsvcToolChain(ToolChain):
         """Check if compiler matches vendor."""
         return vendor == 'msvc'
 
-    def supports_resource_compilation(self):
-        return True
-
     # ------------------------------------------------------------------
     # File naming properties — MSVC conventions
     # ------------------------------------------------------------------
@@ -754,6 +795,10 @@ class MsvcToolChain(ToolChain):
     # ------------------------------------------------------------------
     # Output file naming (MSVC conventions)
     # ------------------------------------------------------------------
+
+    @property
+    def exe_suffix(self) -> str:
+        return '.exe'
 
     def object_file_of(self, src):
         """MSVC produces .obj files."""
@@ -942,20 +987,143 @@ class MsvcToolChain(ToolChain):
         return valid_flags
 
 
-def create_toolchain(m=None):
-    """Create the appropriate toolchain for the current platform.
+# ------------------------------------------------------------------
+# Toolchain kind / target helpers
+# ------------------------------------------------------------------
 
-    On Windows, reads ``msvc_config.target_arch`` to determine the target
-    architecture. The *m* parameter (bits, ``'32'`` or ``'64'``) is reserved
-    for future cross-compilation support.
+_CC_TOOLCHAIN_KINDS = {'gcc', 'clang', 'msvc', 'mingw', 'cygwin'}
 
-    Returns:
-        A ToolChain instance appropriate for the current OS.
+_HOST_TARGET_MAP = {
+    'linux': 'linux',
+    'linux2': 'linux',
+    'darwin': 'darwin',
+    'win32': 'windows',
+    'cygwin': 'windows',
+    'msys': 'windows',
+}
+
+
+def _default_target_for_kind(kind):
+    """Default ``target`` for a given toolchain *kind*."""
+    if kind in ('mingw', 'cygwin', 'msvc'):
+        return 'windows'
+    return _HOST_TARGET_MAP.get(sys.platform, 'linux')
+
+
+def _resolve_tool(prefix, tool_prefix, tool_name):
+    """Resolve a tool path from *prefix* + *tool_prefix* + *tool_name*.
+
+    When *prefix* is set, only ``<prefix>/bin/<tool_prefix><tool_name>`` and
+    ``<prefix>/<tool_prefix><tool_name>`` are checked; PATH is never searched.
+    When *prefix* is empty, ``which()`` on PATH is used instead.
+
+    Returns the best-effort path string (may be a bare name if nothing found).
     """
+    import shutil
+    full_name = tool_prefix + tool_name
+    if prefix:
+        for subdir in ('bin', ''):
+            path = os.path.join(prefix, subdir, full_name) if subdir else os.path.join(prefix, full_name)
+            if os.path.isfile(path):
+                return path
+        return full_name
+    found = shutil.which(full_name)
+    if found:
+        return found
+    return full_name
+
+
+def _auto_detect_kind():
+    """Auto-detect toolchain kind from the host platform."""
     if os.name == 'nt':
-        from blade import config as blade_config
+        return 'msvc'
+    import shutil
+    if shutil.which('gcc'):
+        return 'gcc'
+    if shutil.which('clang'):
+        return 'clang'
+    return 'gcc'  # fallback
+
+
+def _lookup_config(tc_section, cc_toolchain):
+    """Look up a toolchain config by *name* or *kind*.
+
+    Returns ``(config_dict | None, kind_str | '')``.
+    """
+    # 1. Match by name (named config stored directly in the section)
+    if cc_toolchain:
+        named = tc_section.get(cc_toolchain)
+        if isinstance(named, dict):
+            return named, named.get('kind', '')
+        # 2. Match by kind directly
+        if cc_toolchain in _CC_TOOLCHAIN_KINDS:
+            return None, cc_toolchain
+        console.warning(
+            'Unknown toolchain "%s", falling back to default or auto-detection'
+            % cc_toolchain)
+    return None, ''
+
+
+def _resolve_config(cfg, tc_section):
+    """Given an optional named *cfg* dict, return (kind, target, prefix,
+    tool_prefix, cc, cxx, ld, ar, target_arch, msvc_version).
+
+    Falls back to the unnamed default entry (key ``''``) when *cfg* is None.
+    """
+    if cfg is None:
+        cfg = tc_section.get('', {})
+    kind = cfg.get('kind', '') or _auto_detect_kind()
+    target = cfg.get('target', '') or _default_target_for_kind(kind)
+    prefix = cfg.get('prefix', '')
+    tool_prefix = cfg.get('tool_prefix', '')
+    cc = cfg.get('cc', '')
+    cxx = cfg.get('cxx', '')
+    ld = cfg.get('ld', '')
+    ar = cfg.get('ar', '')
+    target_arch = cfg.get('target_arch', '')
+    msvc_version = cfg.get('msvc_version', '')
+    return kind, target, prefix, tool_prefix, cc, cxx, ld, ar, target_arch, msvc_version
+
+
+def create_toolchain(cc_toolchain=''):
+    """Create the toolchain based on config, CLI flag, or auto-detection.
+
+    Selection priority:
+    1. ``--cc-toolchain=`` CLI flag (match by *name* then *kind*)
+    2. ``cc_config.toolchain`` in BLADE_ROOT (default toolchain name)
+    3. ``cc_toolchain_config()`` in BLADE_ROOT (named or unnamed)
+    4. Auto-detection from host platform
+
+    Args:
+        cc_toolchain: Value of ``--cc-toolchain`` CLI flag (``''`` if not set).
+    """
+    from blade import config as blade_config
+    tc_section = blade_config.get_section('cc_toolchain_config')
+
+    if not cc_toolchain:
+        cc_toolchain = blade_config.get_section('cc_config').get('toolchain', '')
+
+    cfg, kind = _lookup_config(tc_section, cc_toolchain)
+
+    (kind, target, prefix, tool_prefix, cc, cxx, ld, ar,
+     target_arch, msvc_version) = _resolve_config(cfg, tc_section)
+
+    # Override kind from CLI if it was a kind match rather than named config
+    if cfg is None and cc_toolchain in _CC_TOOLCHAIN_KINDS:
+        kind = cc_toolchain
+
+    if kind == 'msvc':
         msvc_config = blade_config.get_section('msvc_config')
-        target_arch = msvc_config.get('target_arch', 'auto')
-        msvc_version = msvc_config.get('msvc_version', 'auto')
+        target_arch = (target_arch or
+                       msvc_config.get('target_arch', 'auto'))
+        msvc_version = (msvc_version or
+                        msvc_config.get('msvc_version', 'auto'))
         return MsvcToolChain(target_arch=target_arch, msvc_version=msvc_version)
-    return GccToolChain()
+
+    return GccToolChain(
+        kind=kind,
+        cc=cc, cxx=cxx, ld=ld, ar=ar,
+        target=target,
+        prefix=prefix,
+        tool_prefix=tool_prefix,
+    )
