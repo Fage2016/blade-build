@@ -169,7 +169,7 @@ class CcArchiveRulesTest(unittest.TestCase):
     def test_darwin_deterministic_uses_libtool(self):
         gen = self._make_gen('darwin')
         cmd = self._capture_ar_command(gen, deterministic=True, thin=False)
-        self.assertIn('libtool -static -o $out $in', cmd)
+        self.assertIn('libtool -static -no_warning_for_no_symbols -o $out $in', cmd)
 
     def test_darwin_thin_logs_error(self):
         gen = self._make_gen('darwin')

@@ -449,7 +449,7 @@ class _NinjaFileHeaderGenerator:
                 console.error('cc_library_config.thin=True is not supported on macOS '
                               '(Apple ar does not support thin archives)')
             if deterministic:
-                command = 'rm -f $out; libtool -static -o $out $in'
+                command = 'rm -f $out; libtool -static -no_warning_for_no_symbols -o $out $in'
             else:
                 ar = self.build_accelerator.get_ar_command()
                 command = f'rm -f $out; {ar} rcs $out $in'
