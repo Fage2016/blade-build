@@ -3,5 +3,10 @@
     "python.analysis.extraPaths": [
         "src",
         "src/test"
-    ]
+    ],
+    "[python]": {
+        "editor.formatOnSave": false,
+        "editor.formatOnPaste": false,
+        "editor.formatOnType": false
+    }
 }

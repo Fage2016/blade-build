@@ -15,10 +15,12 @@ API for BUILD files and extensions.
 
 import os
 import re
+import sys
 import types
 
 import blade
 
+from blade import build_attributes
 from blade import config
 from blade import console
 from blade import util
@@ -89,17 +91,36 @@ def _safe_util_module():
 def _safe_workspace_module():
     """Make the safe blade.workspace module."""
     module = _new_module('workspace')
-    module.root_dir = workspace.current().root_dir
-    module.build_dir = workspace.current().build_dir
+    ws = workspace.current()
+    assert ws is not None, 'workspace must be initialized before accessing blade.workspace'
+    module.root_dir = ws.root_dir
+    module.build_dir = ws.build_dir
     return module
+
+
+def _host_os():
+    """Host OS name: ``'darwin'``, ``'linux'``, or ``'windows'``."""
+    if sys.platform == 'win32':
+        return 'windows'
+    return sys.platform
+
+
+def _host_arch():
+    """Canonical host CPU architecture: ``'x86_64'``, ``'aarch64'``, etc."""
+    import platform
+    machine = platform.machine()
+    if machine.lower() in ('arm64', 'aarch64'):
+        return 'aarch64'
+    if machine.lower() in ('amd64', 'x86_64'):
+        return 'x86_64'
+    return machine.lower()
 
 
 class _CCToolchainProxy:
     """Read-only toolchain proxy exposed as ``blade.cc_toolchain`` in BUILD files.
 
-    Five file-naming properties plus a unified ``.tool(key)`` lookup that
-    returns a path string or ``None`` for toolchain-specific tools (``'rc'``,
-    ``'as'``, etc.).
+    File-naming properties, tool lookup, and target platform / architecture
+    info (useful for cross-compilation-aware deps in BUILD files).
     """
 
     @property
@@ -126,6 +147,21 @@ class _CCToolchainProxy:
     def exe_suffix(self) -> str:
         return self._tc.exe_suffix
 
+    @property
+    def cc_vendor(self) -> str:
+        """Compiler vendor: ``'gcc'``, ``'clang'``, or ``'unknown'``."""
+        return self._tc._cc_vendor
+
+    @property
+    def target_os(self) -> str:
+        """Target OS: ``'darwin'``, ``'linux'``, ``'windows'``."""
+        return self._tc.target_os
+
+    @property
+    def target_arch(self) -> str:
+        """Target CPU architecture: ``'x86_64'``, ``'aarch64'``, etc."""
+        return self._tc.target_arch
+
     def tool(self, key: str) -> str | None:
         """Return tool path for *key*, or ``None`` if not available.
 
@@ -134,18 +170,55 @@ class _CCToolchainProxy:
         return self._tc.tool(key)
 
 
-def _safe_blade_module():
+# Attributes only available during BUILD phase (not when loading BLADE_ROOT).
+_BUILD_ONLY_ATTRS = frozenset({
+    'cc_toolchain',
+    'config',
+    'current_source_dir',
+    'current_target_dir',
+    'workspace',
+})
+
+_BUILD_ONLY_HINT = (
+    ' is only available during BUILD phase. '
+    'Use a function-valued config item: lambda blade: blade.'
+)
+
+
+class _BladeModule(types.ModuleType):
+    """Blade module with read-only properties and config-phase guards."""
+
+    def __init__(self, name: str, config_phase: bool = False):
+        super().__init__(name)
+        self._config_phase = config_phase
+
+    def __getattr__(self, name: str):
+        if self._config_phase and name in _BUILD_ONLY_ATTRS:
+            console.fatal(f'blade.{name}{_BUILD_ONLY_HINT}{name}')
+        raise AttributeError(f"module 'blade' has no attribute {name!r}")
+
+    @property
+    def build_type(self) -> str:
+        """Current build type: ``'debug'`` or ``'release'``."""
+        instance = blade.build_manager.instance
+        if instance is not None:
+            return instance.get_options().profile
+        return 'debug' if build_attributes.attributes.is_debug() else 'release'
+
+    def build_type_is_debug(self) -> bool:
+        """Return ``True`` if the build type is ``'debug'``."""
+        return self.build_type == 'debug'
+
+
+def _safe_blade_module(config_phase: bool = True):
     """Make the safe blade module."""
-    module = _new_module('blade')
-    module.config = _safe_config_module()
+    module = _BladeModule('blade', config_phase=config_phase)
     module.console = _safe_console_module()
-    module.current_source_dir = blade.current_source_dir
-    module.current_target_dir = blade.current_target_dir
     module.path = _safe_path_module()
     module.re = re
     module.util = _safe_util_module()
-    module.workspace = _safe_workspace_module()
-    module.cc_toolchain = _CCToolchainProxy()
+    module.host_os = _host_os()
+    module.host_arch = _host_arch()
     return module
 
 
@@ -156,5 +229,18 @@ def get_blade_module():
     """Get or create the `blade` API module."""
     global __blade
     if not __blade:
-        __blade = _safe_blade_module()
+        __blade = _safe_blade_module(config_phase=False)
+        # These attributes only exists since the load pharse.
+        __blade.config = _safe_config_module()
+        __blade.current_source_dir = blade.current_source_dir
+        __blade.current_target_dir = blade.current_target_dir
+        __blade.cc_toolchain = _CCToolchainProxy()
+        __blade.workspace = _safe_workspace_module()
+
     return __blade
+
+
+def new_blade_module_for_config():
+    """Create a `blade` API module for the config phase."""
+    return _safe_blade_module(config_phase=True)
+
