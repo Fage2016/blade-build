@@ -81,6 +81,12 @@ Blade invokes the backend build tool (Ninja) to perform the actual build, then r
 
 Test targets are built, then executed in parallel within sandbox environments. Results are collected and reported.
 
+## Implementation Topics
+
+In-depth documents on how individual subsystems are implemented:
+
+- [How the C/C++ header dependency check (hdrs check) works](develop/hdrs_check.md)
+
 ## Testing
 
 ### Unit tests (`src/tests/unit/`)
