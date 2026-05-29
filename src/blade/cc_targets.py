@@ -107,6 +107,12 @@ def find_libs_by_header(hdr):
 # dict(hdr, set(targets))
 _private_hdrs_target_map = {}
 
+# set(target_key): libraries declared with an explicit empty `hdrs = []`, i.e.
+# "no public interface". Such a lib can never be header-used, so the unused-deps
+# check exempts it (flagging it would be pure noise). NOTE: a lib with `hdrs`
+# unset (None) is NOT recorded here -- that is a separate `hdrs_missing` warning.
+_header_less_target_keys = set()
+
 
 def declare_private_hdrs(target, hdrs):
     """Declare private header files of a cc target."""
@@ -117,11 +123,17 @@ def declare_private_hdrs(target, hdrs):
         _private_hdrs_target_map[hdr].add(target.key)
 
 
+def declare_header_less(target: 'CcTarget') -> None:
+    """Declare a library as having no public headers (explicit `hdrs = []`)."""
+    _header_less_target_keys.add(target.key)
+
+
 def inclusion_declaration():
     return {
         'public_hdrs': _hdr_targets_map,
         'public_incs': _hdr_dir_targets_map,
         'private_hdrs': _private_hdrs_target_map,
+        'header_less': _header_less_target_keys,
         'allowed_undeclared_hdrs': config.get_item('cc_config', 'allowed_undeclared_hdrs')
     }
 
@@ -290,6 +302,10 @@ class CcTarget(Target):
                 getattr(self, severity)(
                         'Missing "hdrs" declaration. The public header files should be declared '
                         'explicitly, if no public header file, set "hdrs" to empty (hdrs = [])')
+        elif not hdrs:
+            # Explicit `hdrs = []`: the library declares it has no public interface,
+            # so the unused-deps check exempts it. See `_header_less_target_keys`.
+            declare_header_less(self)
         if not hdrs:
             return
         hdrs = var_to_list(hdrs)
@@ -803,6 +819,10 @@ class CcTarget(Target):
             'declared_genincs': declared_genincs,
             'severity': config.get_item('cc_config', 'hdr_dep_missing_severity'),
             'suppress': verify_suppress.get(self.key, {}),
+            'unused_deps_severity': config.get_item('cc_config', 'unused_deps_severity'),
+            'unused_deps_suppress':
+                config.get_item('cc_config', 'unused_deps_suppress').get(self.key, []),
+            'keep_deps': self.attr.get('keep_deps', []),
         }
         content = pickle.dumps(target_check_info)
 
@@ -1188,6 +1208,7 @@ def cc_library(
         srcs: StrOrListOpt = None,
         hdrs: StrOrListOpt = None,
         deps: StrOrListOpt = None,
+        keep_deps: StrOrListOpt = None,
         visibility: StrOrListOpt = None,
         tags: StrOrListOpt = None,
         warning: str = 'yes',
@@ -1223,6 +1244,10 @@ def cc_library(
             trigger recompilation.
     """
     # pylint: disable=too-many-locals
+    # `keep_deps` are real deps (built/linked/header-visible) merged into `deps`,
+    # but recorded so the unused-deps check exempts them. See issue #1155.
+    keep_deps = var_to_list(keep_deps)
+    deps = var_to_list(deps) + keep_deps
     if pre_build or prebuilt:
         target = prebuilt_cc_library(
                 name=name,
@@ -1262,6 +1287,7 @@ def cc_library(
             secret=secret or secure,
             secret_revision_file=secret_revision_file,
             kwargs=kwargs)
+    target.attr['keep_deps'] = [target._unify_dep(d) for d in keep_deps]
     build_manager.instance.register_target(target)
 
 
@@ -1598,6 +1624,7 @@ class CcBinary(CcTarget):
 def cc_binary(name: str,
               srcs: StrOrListOpt = None,
               deps: StrOrListOpt = None,
+              keep_deps: StrOrListOpt = None,
               visibility: StrOrListOpt = None,
               tags: StrOrListOpt = None,
               warning: str = 'yes',
@@ -1614,10 +1641,11 @@ def cc_binary(name: str,
               export_dynamic: bool = False,
               **kwargs: object):
     """cc_binary target."""
+    keep_deps = var_to_list(keep_deps)
     cc_binary_target = CcBinary(
             name=name,
             srcs=srcs,
-            deps=deps,
+            deps=var_to_list(deps) + keep_deps,
             visibility=visibility,
             tags=tags,
             warning=warning,
@@ -1633,6 +1661,7 @@ def cc_binary(name: str,
             version_scripts=version_scripts,
             export_dynamic=export_dynamic,
             kwargs=kwargs)
+    cc_binary_target.attr['keep_deps'] = [cc_binary_target._unify_dep(d) for d in keep_deps]
     build_manager.instance.register_target(cc_binary_target)
 
 
@@ -1788,6 +1817,7 @@ def cc_plugin(
         name: str,
         srcs: 'StrOrListOpt' = None,
         deps: 'StrOrListOpt' = None,
+        keep_deps: 'StrOrListOpt' = None,
         visibility: 'StrOrListOpt' = None,
         tags: 'StrOrListOpt' = None,
         warning: str = 'yes',
@@ -1805,10 +1835,11 @@ def cc_plugin(
         strip: bool = False,
         **kwargs: object):
     """cc_plugin target."""
+    keep_deps = var_to_list(keep_deps)
     target = CcPlugin(
             name=name,
             srcs=srcs,
-            deps=deps,
+            deps=var_to_list(deps) + keep_deps,
             visibility=visibility,
             tags=tags,
             warning=warning,
@@ -1825,6 +1856,7 @@ def cc_plugin(
             allow_undefined=allow_undefined,
             strip=strip,
             kwargs=kwargs)
+    target.attr['keep_deps'] = [target._unify_dep(d) for d in keep_deps]
     build_manager.instance.register_target(target)
 
 
@@ -1920,6 +1952,7 @@ class CcTest(CcBinary):
 def cc_test(name: str,
             srcs: StrOrListOpt = None,
             deps: StrOrListOpt = None,
+            keep_deps: StrOrListOpt = None,
             visibility: StrOrListOpt = None,
             tags: StrOrListOpt = None,
             warning: str = 'yes',
@@ -1940,10 +1973,11 @@ def cc_test(name: str,
             **kwargs: object):
     """cc_test target."""
     # pylint: disable=too-many-locals
+    keep_deps = var_to_list(keep_deps)
     cc_test_target = CcTest(
             name=name,
             srcs=srcs,
-            deps=deps,
+            deps=var_to_list(deps) + keep_deps,
             visibility=visibility,
             tags=tags,
             warning=warning,
@@ -1962,6 +1996,7 @@ def cc_test(name: str,
             heap_check=heap_check,
             heap_check_debug=heap_check_debug,
             kwargs=kwargs)
+    cc_test_target.attr['keep_deps'] = [cc_test_target._unify_dep(d) for d in keep_deps]
     build_manager.instance.register_target(cc_test_target)
 
 

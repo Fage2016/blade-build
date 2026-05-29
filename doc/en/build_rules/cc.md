@@ -225,6 +225,31 @@ If it belongs to other libraries, it should be added to `hdrs` of other librarie
 For undeclared header files that already existed in the code base before the upgrade, you can use the
 [cc_config.allowed_undeclared_hdrs](../config.md#cc_config) configuration item to mask the check.
 
+### Check unused dependencies
+
+The complement of the missing-dependency check above: Blade can also detect **redundant dependencies** — a library declared in `deps` whose public headers are never directly `#include`d by the target's sources or headers. Redundant deps slow down builds, leak unnecessary transitive dependencies, and rot over time.
+
+This check is **on by default at `'warning'`** (advisory — reported but does not fail the build); via [`cc_config.unused_deps_severity`](../config.md#cc_config) set it to `'error'` to fail the build, or `'debug'` to silence. Advisory by default, like Bazel's `unused_deps` tool and Buck2.
+
+The following deps are never reported:
+
+- Libraries declared with an explicit empty `hdrs = []` (no public interface — e.g. a library depended on only for linking / static-initializer self-registration), since there is no header that could be used. Note `proto_library` has `.pb.h` and is still checked; a library with `hdrs` unset (`None`) is also still checked.
+- Deps listed in a target's `keep_deps` attribute — deps you intentionally keep (e.g. linked but headers not directly used). `keep_deps` are real dependencies (built, linked, header-visible, just like `deps`); they are merged into the dependency graph but exempt from this check, and reading better than burying them in config:
+
+  ```python
+  cc_library(
+      name = 'foo',
+      srcs = ['foo.cc'],
+      hdrs = ['foo.h'],
+      deps = [':bar'],            # used via headers
+      keep_deps = [':baz'],       # intentionally linked, headers not included
+  )
+  ```
+
+- Deps listed in [`cc_config.unused_deps_suppress`](../config.md#cc_config) as a `{target: [deps]}` map (mainly for incrementally cleaning up an existing code base, where editing every BUILD file is impractical).
+
+> Tip: a library depended on for its link-time side effects (e.g. self-registration via global objects) without including its headers should itself declare `link_all_symbols = True` so the linker does not drop it. The check does **not** auto-exempt such libraries (many `link_all_symbols` libraries are in fact redundant deps), so if the dependency is genuinely intentional, list it in `unused_deps_suppress`.
+
 ## prebuilt_cc_library
 
 For libraries without source code, library should be put under the lib{32,64} sub dir accordingly.

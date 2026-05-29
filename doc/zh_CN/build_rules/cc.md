@@ -197,6 +197,31 @@ Blade 能检查到两种缺失情况：
 根据其是公开或者私有的，分别将其加入到 `hdrs` 或者 `srcs` 中；如果属于其他库，则应当加入到其他库的 `hdrs` 中，不能包含其他库的未声明的私有头文件。
 对于升级前代码库中已经存在的未声明的头文件，可以用 [cc_config.allowed_undeclared_hdrs](../config.md#cc_config) 配置项屏蔽检查。
 
+### 检查未使用的依赖
+
+与上面「缺失依赖」相对，Blade 还能检查**多余的依赖**：在 `deps` 中声明了某个库，但本目标的源文件和头文件并没有直接 `#include` 它的任何公开头文件。多余依赖会拖慢构建、传递不必要的依赖，长期容易腐化。
+
+该检查默认即以 `'warning'`（建议性）开启：会提示但不导致构建失败。通过 [`cc_config.unused_deps_severity`](../config.md#cc_config) 可设为 `'error'` 让构建失败，或设为 `'debug'` 关闭。与 Bazel 的 `unused_deps`、Buck2 一致，默认是建议性的。
+
+以下依赖不会被报告：
+
+- 以**显式空 `hdrs = []`** 声明的「无公开接口」库——它没有可被使用的公开头文件（典型如仅用于链接、靠静态初始化自注册的库）。注意 `proto_library` 有 `.pb.h`，仍会被检查；`hdrs` 未声明（`None`）的库也仍会被检查。
+- 列在目标 `keep_deps` 属性中的依赖——你**有意保留**的依赖（例如需要链接、但不直接包含其头文件）。`keep_deps` 是真实依赖（和 `deps` 一样会被构建、链接、头文件可见），只是会被合并进依赖图、同时豁免本检查；相比埋在 config 里，写在目标处更自文档化：
+
+  ```python
+  cc_library(
+      name = 'foo',
+      srcs = ['foo.cc'],
+      hdrs = ['foo.h'],
+      deps = [':bar'],            # 通过头文件使用
+      keep_deps = [':baz'],       # 有意链接，但不包含其头文件
+  )
+  ```
+
+- 在 [`cc_config.unused_deps_suppress`](../config.md#cc_config) 中按 `{target: [deps]}` 列出的依赖（主要用于存量代码的逐步治理——逐个改 BUILD 不现实时）。
+
+> 提示：有的库是为了链接其副作用（例如靠全局对象自注册）而被依赖、并不包含其头文件。这类库为了不被链接器丢弃，本身应声明 `link_all_symbols = True`；但该检查**不会**因此自动豁免它（很多 `link_all_symbols` 的库其实是多余依赖），所以如果确属有意保留，请将其列入 `unused_deps_suppress`。
+
 ## prebuilt_cc_library
 
 主要用于描述一些没有源代码或者或者是通过别的构建系统已经构建好的第三方库。
