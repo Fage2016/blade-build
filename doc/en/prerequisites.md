@@ -13,7 +13,7 @@ Blade requires the following core dependencies for basic operation:
 
 ### Core Runtime Dependencies
 - **Python:** Version 3.10 or newer
-- **Ninja Build System:** Version 1.8+ (required as build backend)
+- **Ninja Build System:** Version 1.10+ (required as build backend)
 
 ## Optional Performance Enhancements
 
@@ -69,7 +69,7 @@ Blade integrates with the following tools for enhanced build performance:
 | Component | Minimum Version | Recommended Version | Notes |
 |-----------|-----------------|-------------------|--------|
 | Python | 3.10 | 3.12+ | v3 requires Python 3.10 or newer |
-| Ninja | 1.8 | 1.10+ | Core build backend |
+| Ninja | 1.10 | 1.11+ | Build backend; 1.10+ required for multi-output rules with depslog |
 | GCC | 4.0 | 7.0+ | Clang 6.0+ also supported |
 | JDK | 1.6 | 11+ | LTS versions recommended |
 
