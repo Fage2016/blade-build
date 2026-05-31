@@ -131,9 +131,9 @@ pyright
 
 1. **Create a target class** in a new or existing `*_targets.py` module. Inherit from `Target` (or a suitable subclass) and implement `generate()`.
 2. **Define the rule-entry function** (e.g., `windows_resources()`) — this function normalizes BUILD-file-friendly types (`StrOrListOpt`) into `list[str]` via `var_to_list` / `var_to_list_or_none`, creates the target instance, and registers it via `build_manager.instance.register_target()`.
-3. **Expose it in the DSL** by adding the function to `blade/__init__.py` and [dsl_api.py](src/blade/dsl_api.py).
+3. **Expose it in the DSL** by adding the function to `blade/__init__.py` and [dsl_api.py](../../src/blade/dsl_api.py).
 4. **Add integration test data** under `src/test/testdata/<rule_name>/` with a `BUILD` file and source fixtures, then add a test class in `src/test/<rule_name>_test.py`.
-5. **Update documentation** in [doc/en/build_rules/cc.md](doc/en/build_rules/cc.md) (or a new file for a new category).
+5. **Update documentation** in [build_rules/cc.md](build_rules/cc.md) (or a new file for a new category).
 
 ### Key design patterns
 
@@ -152,6 +152,29 @@ blade build --stop-after generate
 This stops after generating the backend build file (e.g. `build.ninja`), letting you inspect the generated output.
 
 `--profiling` outputs a performance analysis report after execution. Combine with `--stop-after` to profile specific phases.
+
+### Passing options to the backend builder (ninja)
+
+`--backend-builder-options` forwards arbitrary options straight to ninja (see [`ninja_runner.py`](../../src/blade/ninja_runner.py)). The most useful for debugging:
+
+```bash
+# Why is a target (re)built — especially one that rebuilds on EVERY run?
+# Ask ninja to explain each decision.
+blade build //foo/... --backend-builder-options="-d explain"
+
+# Show the exact commands ninja runs (-v), and/or dry-run without building (-n).
+blade build //foo/... --backend-builder-options="-v"
+```
+
+`-d explain` prints, for every edge it would run, *why* it is considered dirty — a newer input, an output older than an input, a changed command line, or a recorded dependency (`deps`/depfile) that no longer exists. It is the first tool to reach for when a build isn't incremental.
+
+You can also run ninja directly against the generated build file (handy after `blade build --stop-after generate`, which keeps it instead of deleting it). Blade runs ninja from the workspace root, so use the build-dir-relative path; add `-n` for a dry run that explains without building:
+
+```bash
+ninja -f build64_release/build.ninja -d explain -n
+```
+
+Tip: ninja only strips its `msvc_deps_prefix` (`Note: including file:`) lines from console output as a side effect of `deps = msvc`; all other tool chatter is echoed verbatim. On MSVC, Blade's `cc_wrapper.py` / `link_wrapper.py` (written into the build dir) filter compiler/linker noise that ninja won't.
 
 ## CI
 

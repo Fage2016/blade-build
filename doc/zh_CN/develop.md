@@ -129,9 +129,9 @@ pyright
 
 1. **创建目标类** — 在新增或已有的 `*_targets.py` 模块中创建目标类，继承 `Target`（或合适的子类）并实现 `generate()` 方法。
 2. **定义规则入口函数**（如 `windows_resources()`）—— 此函数负责将 BUILD 友好的类型（`StrOrListOpt`）通过 `var_to_list` / `var_to_list_or_none` 规范化为 `list[str]`，创建目标实例，通过 `build_manager.instance.register_target()` 注册。
-3. **暴露到 DSL** — 将规则函数加入 `blade/__init__.py` 和 [dsl_api.py](src/blade/dsl_api.py)。
+3. **暴露到 DSL** — 将规则函数加入 `blade/__init__.py` 和 [dsl_api.py](../../src/blade/dsl_api.py)。
 4. **添加集成测试数据** — 在 `src/test/testdata/<rule_name>/` 下放置 BUILD 文件和源文件夹具，在 `src/test/<rule_name>_test.py` 添加测试类。
-5. **更新文档** — 在 [doc/zh_CN/build_rules/cc.md](doc/zh_CN/build_rules/cc.md)（或新规则类别对应的新文件）中添加说明。
+5. **更新文档** — 在 [build_rules/cc.md](build_rules/cc.md)（或新规则类别对应的新文件）中添加说明。
 
 ### 核心设计模式
 
@@ -150,6 +150,28 @@ blade build --stop-after generate
 此命令在生成后端构建系统描述文件（如 `build.ninja`）后停止，可用于检查生成结果。
 
 `--profiling` 选项在 blade 结束后输出性能分析报告。可与 `--stop-after` 组合用于分析不同阶段的性能。
+
+### 向后端构建器（ninja）传递选项
+
+`--backend-builder-options` 可把任意选项直接转发给 ninja（见 [`ninja_runner.py`](../../src/blade/ninja_runner.py)）。调试时最常用的：
+
+```bash
+# 为什么某个目标会被（重新）构建——尤其是每次都重建的？让 ninja 解释它的判断。
+blade build //foo/... --backend-builder-options="-d explain"
+
+# 打印 ninja 实际执行的命令（-v），或只做 dry-run 不实际构建（-n）。
+blade build //foo/... --backend-builder-options="-v"
+```
+
+`-d explain` 会为每条将要执行的 edge 打印它被判定为“脏”的*原因*——输入更新、输出比输入旧、命令行变化、或记录的依赖（`deps`/depfile）已不存在。当构建不增量（尤其是每次都重建）时，这是首先要用的工具。
+
+也可以直接对生成的构建文件运行 ninja（在 `blade build --stop-after generate` 之后很方便，该选项会保留而非删除它）。blade 从工作区根目录运行 ninja，所以用相对 build 目录的路径；加 `-n` 做只解释不构建的 dry-run：
+
+```bash
+ninja -f build64_release/build.ninja -d explain -n
+```
+
+提示：ninja 只会作为 `deps = msvc` 的副作用从控制台输出中剥掉它的 `msvc_deps_prefix`（`Note: including file:`）行；其余工具输出都原样回显。在 MSVC 上，blade 的 `cc_wrapper.py` / `link_wrapper.py`（生成在 build 目录里）会过滤 ninja 不处理的编译器/链接器噪音。
 
 ## CI
 
