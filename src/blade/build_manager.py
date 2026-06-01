@@ -37,6 +37,34 @@ from blade.util import (cpu_count, md5sum_file)
 instance = None
 
 
+def _log_system_symbol_resolution(alias, cache):
+    """Emit a one-line diagnostic per resolved alias.
+
+    Failing aliases land as warnings (silent baseline gaps look like false-
+    positive undefined symbols later); successful ones land as info with
+    the symbol count and source library path so CI logs make it easy to
+    spot when ``cc -print-file-name`` resolved a library to the wrong file.
+    """
+    if cache is None:
+        console.warning(
+            'system_symbols: could not resolve "%s" -- check rule will treat '
+            'its symbols as undefined' % alias)
+        return
+    n = 0
+    src = '?'
+    try:
+        with open(cache, encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('# source: '):
+                    src = line[len('# source: '):].rstrip()
+                elif line.strip() and not line.startswith('#'):
+                    n += 1
+    except OSError:
+        pass
+    console.info('system_symbols: %s -> %s (%d symbols from %s)'
+                 % (alias, cache, n, src))
+
+
 # Start of fingerprint line in each per-target ninja file
 _NINJA_FILE_FINGERPRINT_START = '#Fingerprint='
 
@@ -95,6 +123,14 @@ class Blade:
         # The targets keys list after sorting by topological sorting method.
         # Used to generate build code in correct order.
         self.__sorted_targets_keys = []
+
+        # Per-target specs for the project-wide cc_check_undefined batch.
+        # Each cc_library that runs the static undefined-symbol check appends
+        # a dict here at generate time; at the end of build-code generation
+        # they're consolidated into a single ``ccchkund_batch`` ninja rule,
+        # so we pay Python interpreter startup once for the whole project
+        # instead of once per cc_library. See issue #1225.
+        self.__cc_check_undefined_specs = []
 
         # Indicate whether the deps list is expanded by expander or not
         self.__targets_expanded = False
@@ -158,7 +194,86 @@ class Blade:
         maven_cache = maven.MavenCache.instance(self.__build_dir)
         maven_cache.download_all()
         self._write_inclusion_declaration_file()
+        self._prepare_system_symbol_caches()
         self.generate_build_code()
+
+    def _prepare_system_symbol_caches(self):
+        """Pre-generate sidecar symbol files for every system library the
+        cc_check_undefined static check will need.
+
+        Two sources:
+          - the toolchain's default-linked libs (always-implicit baseline)
+          - every distinct ``#alias`` referenced as a dep across all loaded
+            targets (so e.g. ``#m`` only enumerates libm when some target
+            actually wants it)
+
+        Caches live under ``<build_dir>/.cache/system-symbols/`` and are
+        keyed by alias; their headers store ``(mtime, size)`` of the source
+        library so a toolchain or OS upgrade invalidates them automatically
+        without a separate clean step. Mapping alias -> cache file path is
+        stashed on the BuildManager so cc_targets can look it up at codegen
+        time; aliases that fail to resolve are recorded as ``None`` so the
+        check tool can surface a clear "unknown system lib" message instead
+        of silently dropping the dep.
+        """
+        from blade import system_symbols  # pylint: disable=import-outside-toplevel
+        tc = self.get_build_toolchain()
+        cache_dir = os.path.join(self.__build_dir, '.cache', 'system-symbols')
+
+        # Collect aliases. '#alias' deps have path == '#' and name == alias.
+        aliases = set(tc.default_linked_libs)
+        for target in self.__build_targets.values():
+            for dep_key in getattr(target, 'deps', []) or []:
+                # dep keys look like 'path:name'; '#:alias' is the encoded form.
+                if ':' in dep_key:
+                    path, name = dep_key.split(':', 1)
+                    if path == '#':
+                        aliases.add(name)
+
+        resolved = {}
+        for alias in sorted(aliases):
+            try:
+                resolved[alias] = system_symbols.ensure_cache(tc, alias, cache_dir)
+            except Exception as e:  # pylint: disable=broad-except
+                console.warning(
+                    'system_symbols: failed to enumerate "%s": %s' % (alias, e))
+                resolved[alias] = None
+        self._system_symbol_caches = resolved
+        self._system_symbol_default_aliases = tuple(tc.default_linked_libs)
+        # Surface the resolution result for diagnosability: missing aliases
+        # become silent baseline gaps that look like false-positive undefined
+        # symbols at check time.
+        for alias, cache in resolved.items():
+            _log_system_symbol_resolution(alias, cache)
+
+    def get_system_symbol_cache(self, alias):
+        """Return the cache file path for system library ``alias``, or None
+        if it was not pre-generated (unknown alias or resolution failed)."""
+        caches = getattr(self, '_system_symbol_caches', None) or {}
+        return caches.get(alias)
+
+    def get_default_linked_system_caches(self):
+        """Return the list of cache file paths for the toolchain's default-
+        linked libs, suitable to pass as ambient deps to the cc check rule.
+        Missing entries are skipped."""
+        aliases = getattr(self, '_system_symbol_default_aliases', ())
+        return [cf for cf in (self.get_system_symbol_cache(a) for a in aliases) if cf]
+
+    def register_cc_check_undefined(self, spec):
+        """Record one cc_library's undefined-symbol check spec.
+
+        ``spec`` is a dict carrying everything the batch tool needs to run
+        that target's check: ``target_label``, ``target_syms``, ``dep_syms``
+        (list), ``sys_caches`` (list), ``allow_file``. Called from
+        :meth:`CcTarget._generate_check_undefined` instead of emitting a
+        per-target ``ccchkund`` ninja rule.
+        """
+        self.__cc_check_undefined_specs.append(spec)
+
+    def cc_check_undefined_specs(self):
+        """Return the consolidated list of cc_check_undefined specs collected
+        during target generation."""
+        return self.__cc_check_undefined_specs
 
     def _write_inclusion_declaration_file(self):
         from blade import cc_targets  # pylint: disable=import-outside-toplevel
