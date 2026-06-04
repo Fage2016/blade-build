@@ -20,6 +20,12 @@ from cc_plugin_test import TestCcPlugin
 from cc_test_test import TestCcTest
 from dsl_api_test import GetenvTest
 from dump_test import TestDump
+from system_include_test import (
+    DeclareHdrsVirtualPathTest,
+    ExportIncsListTest,
+    GetCcFlagsTest,
+    GetIncsListTest,
+)
 from test_scheduler_test import EffectiveTimeoutTest
 from extension_test import TestExtension
 from gen_rule_test import TestGenRule
@@ -46,7 +52,11 @@ def _main():
         unittest.defaultTestLoader.loadTestsFromTestCase(TestCcBinary),
         unittest.defaultTestLoader.loadTestsFromTestCase(TestCcPlugin),
         unittest.defaultTestLoader.loadTestsFromTestCase(TestCcTest),
+        unittest.defaultTestLoader.loadTestsFromTestCase(DeclareHdrsVirtualPathTest),
         unittest.defaultTestLoader.loadTestsFromTestCase(EffectiveTimeoutTest),
+        unittest.defaultTestLoader.loadTestsFromTestCase(ExportIncsListTest),
+        unittest.defaultTestLoader.loadTestsFromTestCase(GetCcFlagsTest),
+        unittest.defaultTestLoader.loadTestsFromTestCase(GetIncsListTest),
         unittest.defaultTestLoader.loadTestsFromTestCase(GetenvTest),
         unittest.defaultTestLoader.loadTestsFromTestCase(TestDump),
         unittest.defaultTestLoader.loadTestsFromTestCase(TestExtension),
