@@ -209,8 +209,27 @@ def resolve_lib_paths(toolchain, alias):
     Symbols like ``__stack_chk_fail`` live ONLY in the ``_nonshared.a``;
     we must enumerate every member to get a complete baseline.
 
+    If ``alias`` is an absolute path that already points at a real
+    library file, skip resolution and return ``[alias]`` -- this lets
+    callers feed direct-path entries from the toolchain's auto-detected
+    default-linked-libs list (e.g. macOS clang's compiler-rt archive)
+    through the same code path as alias-based entries.
+
     Empty list if the alias can't be resolved.
     """
+    # Direct-path fast path: an entry that's already an absolute path to
+    # an existing file (.a / .dylib / .so / .lib) is consumed verbatim.
+    if os.path.isabs(alias) and os.path.isfile(alias):
+        return [os.path.realpath(alias)]
+    # MSVC: cl.exe has no `-print-file-name`; search the toolchain's library
+    # directories (the equivalent of the LIB env var) for `<alias>.lib`.
+    if toolchain.cc_is('msvc'):
+        for libdir in toolchain.get_system_lib_paths():
+            for candidate in _candidate_filenames(toolchain, alias):
+                path = os.path.join(libdir, candidate)
+                if os.path.isfile(path):
+                    return [os.path.realpath(path)]
+        return []
     cc = toolchain.cc
     for candidate in _candidate_filenames(toolchain, alias):
         try:
@@ -249,8 +268,53 @@ def resolve_lib_paths(toolchain, alias):
     return []
 
 
-def _nm_defined_externals(lib_path):
+def _is_hexoffset(token):
+    """True if ``token`` is a hexadecimal archive offset (dumpbin column)."""
+    try:
+        int(token, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def _dumpbin_defined_symbols(dumpbin, lib_path):
+    """Defined external symbols of an MSVC ``.lib`` via ``dumpbin /linkermember``.
+
+    The first linker member is the archive's symbol index -- exactly the set of
+    names the lib can satisfy at link time (for an import lib, both the ``foo``
+    and ``__imp_foo`` forms). After the ``<N> public symbols`` line each row is
+    ``<hex-offset> <symbol>``; we take the symbol token.
+
+    Empty set on any failure (dumpbin missing, bad lib) -- the caller then
+    treats the lib as contributing no baseline symbols.
+    """
+    try:
+        out = subprocess.check_output(
+            [dumpbin, '/nologo', '/linkermember:1', lib_path],
+            stderr=subprocess.DEVNULL, encoding='utf-8', errors='replace')
+    except (subprocess.CalledProcessError, OSError):  # FileNotFoundError ⊂ OSError
+        return set()
+    symbols = set()
+    started = False
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not started:
+            # The symbol listing begins right after the "<N> public symbols" row.
+            if line.endswith('public symbols'):
+                started = True
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and _is_hexoffset(parts[0]):
+            symbols.add(parts[1].strip())
+    return symbols
+
+
+def _nm_defined_externals(lib_path, toolchain=None):
     """Return the set of externally-defined symbol names in ``lib_path``.
+
+    On MSVC (``toolchain.cc_is('msvc')``) the libraries are COFF ``.lib``
+    archives and ``nm`` is unavailable, so we read the defined externals with
+    ``dumpbin /linkermember`` instead.
 
     Portable across GNU binutils nm and Apple's nm:
       * GNU nm: ``-D`` (dynamic table), ``--defined-only``, ``--extern-only``
@@ -275,6 +339,8 @@ def _nm_defined_externals(lib_path):
     so for ``.tbd`` inputs we go straight to the text parser, which
     sees the symbols of every embedded document.
     """
+    if toolchain is not None and toolchain.cc_is('msvc'):
+        return _dumpbin_defined_symbols(toolchain.dumpbin, lib_path)
     if lib_path.endswith('.tbd'):
         # Skip nm: Apple's nm only enumerates the first YAML document.
         return _tbd_extract_symbols(lib_path)
@@ -483,19 +549,41 @@ def ensure_cache(toolchain, alias, cache_dir):
     bundles libc.so.6 + libc_nonshared.a), union symbols from all of them;
     cache validity is keyed on the first file's (mtime, size) which is
     sufficient because the bundled members upgrade together.
+
+    ``alias`` may be either a short blade-style name (``c``, ``stdc++``,
+    ``System``) or an absolute path to a library file (e.g. macOS clang's
+    compiler-rt archive, picked up via auto-detected default_linked_libs).
+    The cache filename is derived to avoid path separators in either case.
     """
     sources = resolve_lib_paths(toolchain, alias)
     if not sources:
         return None
     primary = sources[0]
-    cache_file = os.path.join(cache_dir, '%s.syms' % alias)
+    cache_file = os.path.join(cache_dir, '%s.syms' % _cache_filename_for(alias))
     if _is_cache_valid(cache_file, alias, primary):
         return cache_file
     symbols = set()
     for src in sources:
-        symbols |= _nm_defined_externals(src)
+        symbols |= _nm_defined_externals(src, toolchain)
     _write_cache(cache_file, alias, primary, symbols)
     return cache_file
+
+
+def _cache_filename_for(alias):
+    """Derive a flat, path-separator-free cache file stem for ``alias``.
+
+    For a short alias (``c``, ``stdc++``, ``System``) return it verbatim.
+    For an absolute path (``/path/to/libclang_rt.osx.a``) use the file's
+    basename plus a short hash of the full path so two different paths
+    with the same basename don't collide (e.g. cross-compile sysroots
+    that ship multiple libgcc.a's under different prefixes).
+    """
+    if not os.path.isabs(alias):
+        return alias
+    import hashlib  # noqa: PLC0415  cold path
+    basename = os.path.basename(alias)
+    short_hash = hashlib.sha1(alias.encode('utf-8')).hexdigest()[:8]
+    return '%s_%s' % (basename, short_hash)
 
 
 def read_symbols(cache_file):

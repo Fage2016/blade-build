@@ -430,31 +430,53 @@ class GccToolChain(ToolChain):
 
     @property
     def default_linked_libs(self) -> 'tuple[str, ...]':
-        """GCC/Clang drivers always pull in libc + the C++ runtime + libgcc-or-
-        compiler-rt helpers + the platform's program-startup objects. macOS
-        bundles libc/libm/libpthread/libdl/libsystem_* into ``libSystem`` and
-        uses ``libc++`` as the C++ runtime; Linux distros expose them
-        individually.
+        """Library aliases the C/C++ driver links implicitly.
 
-        We don't list ``libpthread``/``libm``/``libdl``/``librt`` for Linux:
-        on glibc those are linked only when explicitly requested
-        (``-lpthread`` etc.), which blade already models via ``#pthread`` /
-        ``#m`` / ``#dl`` deps. Including them in the implicit baseline would
-        hide missing ``#xxx`` deps the check is meant to catch.
+        Result is the **union** of:
+          * a hardcoded per-platform minimum (libc / libstdc++ / libgcc_s
+            etc.), so existing workspaces never regress on baseline coverage
+          * what the driver itself reports via ``-###`` parsing, which adds
+            things specific to the host's toolchain (e.g. ``c++`` /
+            ``c++abi`` on macOS, ``stdc++`` on Linux, vendor-specific
+            runtime libs, items introduced by ``-stdlib=libc++`` /
+            cross-compiler / wrapper setups)
+
+        Caching is per-instance: ``-###`` is ~100 ms and the answer is
+        invariant for the toolchain.
+
+        The hardcoded set takes priority on ordering (predictable for
+        link-order-sensitive consumers); auto-detected extras are
+        appended.
+        """
+        cached = getattr(self, '_cached_default_linked_libs', None)
+        if cached is not None:
+            return cached
+        hardcoded = self._hardcoded_default_linked_libs()
+        detected = _detect_default_linked_libs(self.cxx)
+        # Union, preserving hardcoded order and appending novel extras.
+        seen = set(hardcoded)
+        extras = tuple(lib for lib in detected if lib not in seen)
+        result = hardcoded + extras
+        self._cached_default_linked_libs = result
+        return result
+
+    def _hardcoded_default_linked_libs(self) -> 'tuple[str, ...]':
+        """Last-resort defaults when ``-###`` parsing yields nothing.
+
+        We don't list ``libpthread`` / ``libm`` / ``libdl`` / ``librt``
+        for Linux: on glibc those are linked only when explicitly
+        requested (``-lpthread`` etc.), which blade already models via
+        ``#pthread`` / ``#m`` / ``#dl`` deps. Including them in the
+        implicit baseline would hide missing ``#xxx`` deps the check is
+        meant to catch.
 
         For C-only targets the ``stdc++`` / ``c++`` entries contribute
         nothing harmful (they're a no-op for pure C undefined refs).
         """
         if self._target == 'darwin':
-            # libSystem is the unified Apple libc. libc++ for C++ runtime.
-            # libc++abi is usually re-exported through libc++ but we list it
-            # separately to handle ABI symbols (typeinfo, vtables) that may
-            # live there directly.
             return ('System', 'c++', 'c++abi')
         if self._target == 'windows':
-            # GCC on Windows (MinGW): msvcrt is the C runtime.
             return ('msvcrt', 'stdc++', 'gcc_s')
-        # Linux / other ELF: libgcc_s for unwinder + helpers, libc, libstdc++.
         return ('c', 'gcc_s', 'stdc++')
 
 
@@ -487,14 +509,55 @@ class MsvcToolChain(ToolChain):
 
     @property
     def default_linked_libs(self) -> 'tuple[str, ...]':
-        """MSVC implicitly links the UCRT + VC runtime + Win32 base libs.
+        """Library aliases MSVC links implicitly into every binary.
 
-        The exact set depends on the runtime selection (/MD vs /MT vs the
-        debug variants); we list the union so the baseline covers all four
-        configurations. lib.exe / link.exe resolves these via LIB env var
-        plus their own search paths.
+        Union of:
+          * a hardcoded baseline (UCRT + VC runtime + Win32 base libs), so the
+            ``check_undefined`` baseline never regresses even when detection
+            fails
+          * what the compiler itself reports via ``/DEFAULTLIB`` directives
+            (read back with ``dumpbin /directives``), which captures the CRT
+            variant actually selected (``/MD`` -> ``msvcrt``, ``/MT`` ->
+            ``libcmt``, debug -> ``*d``) plus ``oldnames``
+
+        Per-instance cached: detection compiles a tiny TU (~100 ms) and the
+        answer is invariant for the toolchain. Mirrors
+        ``GccToolChain.default_linked_libs``; this is the MSVC analog of the
+        ``-###`` link-line parse (cl.exe accepts neither ``-###`` nor ``-l``).
         """
-        return ('msvcrt', 'vcruntime', 'ucrt', 'kernel32')
+        cached = getattr(self, '_cached_default_linked_libs', None)
+        if cached is not None:
+            return cached
+        hardcoded = self._hardcoded_default_linked_libs()
+        detected = _detect_default_linked_libs_msvc(
+            self.cc, self.get_system_include_paths())
+        # Union, preserving hardcoded order and appending novel extras.
+        seen = set(hardcoded)
+        extras = tuple(lib for lib in detected if lib not in seen)
+        result = hardcoded + extras
+        self._cached_default_linked_libs = result
+        return result
+
+    def _hardcoded_default_linked_libs(self) -> 'tuple[str, ...]':
+        """Baseline when ``/DEFAULTLIB`` detection yields nothing.
+
+        MSVC implicitly links the UCRT + VC runtime + Win32 base libs. The
+        exact CRT depends on the runtime selection (/MD vs /MT vs the debug
+        variants); we list the union so the baseline covers all four
+        configurations. lib.exe / link.exe resolves these via the LIB env var
+        plus their own search paths.
+
+        The C++ standard library is included via both its import lib
+        (``msvcprt``, the /MD variant the compiler selects with
+        ``/DEFAULTLIB:msvcprt`` whenever a C++ STL header is used) and the
+        static lib (``libcpmt``). Both are needed: ``msvcprt`` exports most
+        ``std::`` symbols, but a handful of data globals -- ``std::cerr``, the
+        locale facet ``id`` static members -- are referenced by their *plain*
+        name (defined inline in the headers) and only ``libcpmt`` carries that
+        form (``msvcprt`` has only the ``__imp_`` import stub). Together they
+        make the whole C++ stdlib surface ambient, as it is for any C++ binary.
+        """
+        return ('msvcrt', 'msvcprt', 'libcpmt', 'vcruntime', 'ucrt', 'kernel32')
 
     def __init__(self, target_arch='auto', msvc_version='auto'):
         super().__init__()
@@ -772,6 +835,17 @@ class MsvcToolChain(ToolChain):
                 return first_path
 
         return tool  # Let it fail with a clear error later
+
+    @property
+    def dumpbin(self) -> str:
+        """Path to ``dumpbin.exe`` -- MSVC's object/library inspector.
+
+        Used by the cc ``check_undefined`` static check as the MSVC analog of
+        ``nm``: ``dumpbin /linkermember`` enumerates an import lib's defined
+        externals and ``dumpbin /symbols`` separates a static lib's undefined
+        from defined externals. Resolved alongside cl / lib / link.
+        """
+        return self._get_msvc_command('dumpbin')
 
     def get_resource_compiler(self):
         """Return path to Windows Resource Compiler (``rc.exe``).
@@ -1093,6 +1167,272 @@ class MsvcToolChain(ToolChain):
 # ------------------------------------------------------------------
 # Toolchain kind / target helpers
 # ------------------------------------------------------------------
+
+# `-l<name>` tokens that appear on a GCC/Clang link command line but
+# are NOT library names. ld treats these as flags whose syntax happens
+# to start with `-l`. Filter them out of the auto-detected default-
+# linked-libs set.
+_NON_LIB_DASH_L_FLAGS = frozenset({
+    'to_library',   # -lto_library <path>  : selects the LTO plugin (clang on macOS)
+})
+
+
+def _detect_default_linked_libs(cxx: str) -> 'tuple[str, ...]':
+    """Auto-detect default-linked libraries by parsing the driver's link command.
+
+    Runs ``<cxx> -### -x c++ /dev/null -o <tmp>`` -- ``-###`` prints the
+    full command set the driver would execute without running anything,
+    so it's fast and side-effect-free. The link invocation appears as
+    a separate line containing the linker executable (``ld``, ``ld64``,
+    ``ld.lld``, ``lld``, or ``collect2``); we tokenize it (respecting
+    the driver's argument quoting), pull every ``-l<name>``, and filter
+    known non-library flags.
+
+    Returns an empty tuple when:
+      * the driver doesn't accept ``-###`` (very old / non-standard CC)
+      * no link line could be identified
+      * the link line has no ``-l<name>`` tokens
+    -- caller is expected to fall back to a hardcoded per-platform set.
+    """
+    import shlex                # noqa: PLC0415  pulled lazily; cold path
+    import subprocess           # noqa: PLC0415
+    import tempfile             # noqa: PLC0415
+
+    # tempfile path is needed because some drivers refuse to write to
+    # /dev/null when the architecture's linker insists on creating a
+    # mach-o/ELF header structure.
+    with tempfile.NamedTemporaryFile(suffix='.out', delete=False) as f:
+        tmp_out = f.name
+    try:
+        try:
+            proc = subprocess.run(
+                [cxx, '-###', '-x', 'c++', '/dev/null', '-o', tmp_out],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        # `-###` writes to stderr on both GCC and Clang.
+        output = proc.stderr or proc.stdout
+    finally:
+        try:
+            os.unlink(tmp_out)
+        except OSError:
+            pass  # best-effort cleanup; the temp file may already be gone
+
+    libs: list[str] = []
+    seen: set[str] = set()
+    # Linker executable markers, ordered roughly by likelihood:
+    #  * ``ld``      : Apple ld64 / classic GNU ld
+    #  * ``collect2``: GCC's link wrapper that calls the real ld
+    #  * ``lld`` /``ld.lld``: LLVM lld
+    #  * ``ld64``   : explicit ld64 invocations (some toolchains)
+    linker_markers = ('/ld ', '/ld"', '/collect2 ', '/collect2"',
+                      '/ld.lld', '/lld ', '/lld"', '/ld64')
+    for raw_line in output.splitlines():
+        if not any(marker in raw_line for marker in linker_markers):
+            continue
+        try:
+            tokens = shlex.split(raw_line, posix=True)
+        except ValueError:
+            # Malformed quoting -- skip this line.
+            continue
+        skip_next = False
+        for tok in tokens:
+            if skip_next:
+                # Argument of a previous flag (e.g. the path that follows
+                # ``-lto_library``); not a library entry.
+                skip_next = False
+                continue
+            if tok in _DASH_L_FLAGS_WITH_PATH_ARG:
+                skip_next = True
+                continue
+            entry = _classify_link_token(tok)
+            if entry is None or entry in seen:
+                continue
+            seen.add(entry)
+            libs.append(entry)
+        if libs:
+            # First link line with `-l` tokens wins; subsequent lines
+            # would be informational (e.g. echoed copy of the command).
+            break
+    return tuple(libs)
+
+
+# Link-line flags that consume a following path argument. The path
+# itself must be skipped, otherwise alias-or-direct-path classification
+# would mis-pick it as a default-linked library entry.
+#
+#   -lto_library <plugin.dylib>   : Apple Clang LTO plugin (macOS)
+#   -plugin <liblto_plugin.so>    : GCC's LTO plugin loader (Linux)
+#   -dynamic-linker <ld.so>       : ELF interpreter (Linux ld; ends in .so.N)
+#   -rpath <dir>                  : runtime search path (some flavors take .so)
+#   -rpath-link <dir>             : link-time search path
+#   -T <linker_script>            : GNU ld linker script
+#   -syslibroot <sdk>             : Apple ld64 sysroot
+#   -isysroot <sdk>               : compiler driver sysroot
+#   -o <output>                   : output file
+_DASH_L_FLAGS_WITH_PATH_ARG = frozenset({
+    '-lto_library',
+    '-plugin',
+    '-dynamic-linker',
+    '-rpath',
+    '-rpath-link',
+    '-T',
+    '-syslibroot',
+    '-isysroot',
+    '-o',
+})
+
+
+def _classify_link_token(tok: str) -> 'str | None':
+    """Classify a single link-command token and return the entry to add
+    to ``default_linked_libs``, or ``None`` to skip.
+
+    Two shapes are interesting:
+
+    * ``-l<alias>`` --- a blade-style library alias. We strip the ``-l``
+      and return the alias unchanged. Filter known non-library flags
+      (``-lto_library``) and skip the ``-l:literal-filename`` form
+      (GNU ld extension we can't represent as a blade alias).
+    * Absolute path to a ``.a`` / ``.dylib`` / ``.so`` (or versioned
+      ``.so.N``) --- compiler runtime archives like macOS's
+      ``libclang_rt.osx.a`` arrive this way; their symbols need to land
+      in the baseline too. Return the path verbatim; callers distinguish
+      absolute-path entries from aliases by the leading ``/``.
+
+    Everything else (flags, output paths, the user's compiled .o)
+    returns ``None``.
+    """
+    if tok.startswith('-l') and len(tok) > 2:
+        # ``-l:libfoo.so.1`` is GNU ld's literal-name form; skip.
+        if tok[2] == ':':
+            return None
+        name = tok[2:]
+        if name in _NON_LIB_DASH_L_FLAGS:
+            return None
+        return name
+    # Absolute paths only -- relative paths in the link line are the
+    # user's compiled .o (e.g. ``/tmp/cc<hash>.o``); but we want absolute
+    # toolchain-installed archives, which always come as full paths.
+    if (tok.startswith('/')
+            and (tok.endswith('.a') or tok.endswith('.dylib') or '.so' in tok)
+            # Exclude the user's compiled .o (cleanups), startup object
+            # files, and other non-library outputs from the link line.
+            and not tok.endswith('.o')):
+        return tok
+    return None
+
+
+def _detect_default_linked_libs_msvc(
+        cc: str, include_paths=None) -> 'tuple[str, ...]':
+    """Auto-detect MSVC default-linked libraries from compiler directives.
+
+    The MSVC analog of ``-###`` link-line parsing: the CRT and STL headers (and
+    the compiler itself) inject ``#pragma comment(lib, ...)`` directives into
+    every object file, naming the runtime libraries link.exe pulls implicitly --
+    the CRT variant the runtime flag selected (``/MD`` -> ``MSVCRT``, ``/MT`` ->
+    ``LIBCMT``, debug -> ``*D``), the matching C++ standard library
+    (``MSVCPRT`` / ``LIBCPMT``), and ``OLDNAMES``. We compile a small
+    translation unit and read those ``/DEFAULTLIB`` directives back with
+    ``dumpbin /directives``.
+
+    ``cc`` is the path to ``cl.exe``; ``dumpbin.exe`` is expected alongside it,
+    falling back to PATH. ``include_paths`` (the toolchain's system include
+    dirs) is needed because the probe ``#include``s a C++ STL header so the
+    compiler injects the C++ standard library's ``/DEFAULTLIB`` -- that lib
+    (``msvcprt``) defines ``std::`` symbols (``_Xlength_error``, the locale
+    facets, iostream globals) that a bare ``int main(){}`` never references. We
+    compile with ``/MD`` to match blade's default MSVC runtime (``cc.cppflags``
+    in the builtin config); since the result is unioned with the hardcoded
+    baseline, the exact variant is not critical.
+
+    Returns an empty tuple on any failure (cl/dumpbin missing, compile error,
+    no directives) -- the caller falls back to the hardcoded baseline, so there
+    is no regression risk.
+    """
+    import shutil               # noqa: PLC0415  pulled lazily; cold path
+    import subprocess           # noqa: PLC0415
+    import tempfile             # noqa: PLC0415
+
+    dumpbin = os.path.join(os.path.dirname(cc), 'dumpbin.exe')
+    if not os.path.isfile(dumpbin):
+        found = shutil.which('dumpbin')
+        if not found:
+            return ()
+        dumpbin = found
+
+    # INCLUDE lets the probe pull STL headers (for the C++ stdlib DEFAULTLIB).
+    env = os.environ.copy()
+    if include_paths:
+        env['INCLUDE'] = os.pathsep.join(include_paths)
+
+    tmpdir = tempfile.mkdtemp(prefix='blade_msvc_libs_')
+    try:
+        src = os.path.join(tmpdir, 'probe.cpp')
+        obj = os.path.join(tmpdir, 'probe.obj')
+        with open(src, 'w') as f:
+            # <string> pulls the throw helpers, <iostream> the locale/stream
+            # globals -- together they trigger /DEFAULTLIB:msvcprt.
+            f.write('#include <string>\n#include <iostream>\n'
+                    'int main() { std::string s; std::cout << s; '
+                    'return (int)s.size(); }\n')
+        try:
+            proc = subprocess.run(
+                [cc, '/nologo', '/c', '/MD', src, '/Fo' + obj],
+                capture_output=True, text=True, timeout=30, check=False,
+                cwd=tmpdir, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        if proc.returncode != 0 or not os.path.isfile(obj):
+            return ()
+        try:
+            dump = subprocess.run(
+                [dumpbin, '/nologo', '/directives', obj],
+                capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return ()
+        output = dump.stdout or ''
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    libs: list[str] = []
+    seen: set[str] = set()
+    for raw_line in output.splitlines():
+        entry = _classify_msvc_directive(raw_line)
+        if entry is None or entry in seen:
+            continue
+        seen.add(entry)
+        libs.append(entry)
+    return tuple(libs)
+
+
+def _classify_msvc_directive(line: str) -> 'str | None':
+    """Extract the library alias from a ``dumpbin /directives`` line.
+
+    Lines of interest carry a linker directive ``/DEFAULTLIB:MSVCRT`` or
+    ``/DEFAULTLIB:"libname.lib"`` (drivers vary on quoting and on the ``.lib``
+    suffix). Returns the normalized blade alias (lowercased, quotes and the
+    ``.lib`` suffix stripped) or ``None`` for any other line (the ``Linker
+    Directives`` banner, ``/FAILIFMISMATCH``, ``/merge``, blanks, ...).
+    """
+    text = line.strip()
+    marker = '/DEFAULTLIB:'
+    idx = text.upper().find(marker)
+    if idx == -1:
+        return None
+    value = text[idx + len(marker):].strip()
+    parts = value.split()
+    value = parts[0] if parts else ''
+    value = value.strip('"').strip()
+    if not value:
+        return None
+    if value.lower().endswith('.lib'):
+        value = value[:-4]
+    return value.lower() or None
+
 
 _CC_TOOLCHAIN_KINDS = {'gcc', 'clang', 'msvc', 'mingw', 'cygwin'}
 
