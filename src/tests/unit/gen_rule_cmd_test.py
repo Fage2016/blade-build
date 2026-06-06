@@ -95,5 +95,66 @@ class GenRuleWrapTest(unittest.TestCase):
         self._no_posix_scaffold(w)
 
 
+class GenRuleExpandTest(unittest.TestCase):
+    """$OUTS[i|name] / $SRCS[i|name] indexed/named references."""
+
+    def _target(self, cmd, kind='raw', outputs=None, inputs=None):
+        t = GenRuleTarget.__new__(GenRuleTarget)
+        t.error = mock.Mock()
+        t._gen_kind = kind
+        t.path = 'pkg'
+        t.build_dir = 'bd'
+        t.srcs = ['in.y']
+        t._expand_srcs = lambda: (inputs if inputs is not None else ['pkg/in.y'])
+        t.attr = {
+            'cmd': cmd,
+            'outs': ['parser.cc', 'parser.h'],
+            'outputs': outputs if outputs is not None
+                       else ['bd/pkg/parser.cc', 'bd/pkg/parser.h'],
+            'locations': [],
+        }
+        return t
+
+    def test_index_ref_helper(self):
+        t = self._target('')
+        names, paths = ['a.cc', 'b.h'], ['o/a.cc', 'o/b.h']
+        self.assertEqual(t._index_ref('0', names, paths, 'outs'), 'o/a.cc')
+        self.assertEqual(t._index_ref('1', names, paths, 'outs'), 'o/b.h')
+        self.assertEqual(t._index_ref('b.h', names, paths, 'outs'), 'o/b.h')
+        t._index_ref('9', names, paths, 'outs')   # out of range
+        t._index_ref('nope', names, paths, 'outs')  # unknown name
+        self.assertEqual(t.error.call_count, 2)
+
+    def test_outs_index_and_name(self):
+        t = self._target('gen $OUTS[0] --hdr=$OUTS[parser.h]')
+        self.assertEqual(t._expand_command(),
+                         'gen bd/pkg/parser.cc --hdr=bd/pkg/parser.h')
+
+    def test_srcs_index(self):
+        t = self._target('use $SRCS[0]')
+        self.assertEqual(t._expand_command(), 'use pkg/in.y')
+
+    def test_bare_vars_still_expand(self):
+        # $OUTS (no bracket) must still become ${out}, not be eaten by indexing
+        t = self._target('all $OUTS first $FIRST_OUT')
+        self.assertEqual(t._expand_command(), 'all ${out} first ${_out_1}')
+
+    def test_index_does_not_clobber_bare_outs(self):
+        t = self._target('$OUTS[0] then $OUTS')
+        self.assertEqual(t._expand_command(), 'bd/pkg/parser.cc then ${out}')
+
+    def test_bash_kind_forward_slashes_and_concrete_paths(self):
+        # bash kind: backslash -> '/', and $OUTS/$SRCS are concrete (not ${out})
+        t = self._target(
+            'gen $OUTS[0] all $OUTS in $SRCS',
+            kind='bash',
+            outputs=[r'bd\pkg\parser.cc', r'bd\pkg\parser.h'],
+            inputs=[r'pkg\in.y'])
+        out = t._expand_command()
+        self.assertEqual(out, 'gen bd/pkg/parser.cc all bd/pkg/parser.cc bd/pkg/parser.h in pkg/in.y')
+        self.assertNotIn('\\', out)
+        self.assertNotIn('${out}', out)
+
+
 if __name__ == '__main__':
     unittest.main()
