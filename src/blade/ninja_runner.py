@@ -126,7 +126,7 @@ def _show_progress(process, file_reader):
     finally:
         console.clear_progress_bar()  # wipe the panel
         if process.returncode == 0 and total:
-            console.output('%d build steps completed' % total)
+            console.info('%d build steps completed' % total)
 
 
 def _show_slow_builds(build_dir, build_start_time, show_builds_slower_than):
