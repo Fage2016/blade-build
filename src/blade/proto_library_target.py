@@ -9,6 +9,7 @@ Define proto_library target.
 """
 
 
+import glob
 import os
 import re
 import textwrap
@@ -367,7 +368,9 @@ class ProtoLibrary(CcTarget, java_targets.JavaTargetMixIn):
         # Because cpp_out is always generated, we needn't add this option to other language's out.
         if config.get_item('proto_library_config', 'protoc_direct_dependencies'):
             dependencies = self.protoc_direct_dependencies()
-            dependencies += config.get_item('proto_library_config', 'well_known_protos')
+            dependencies += well_known_protos(
+                self.blade.get_build_toolchain(), self.build_dir,
+                config.get_section('proto_library_config'))
             vars['protocflags'] = '--direct_dependencies %s' % ':'.join(dependencies)
 
     def _dep_import_roots(self):
@@ -575,6 +578,75 @@ build_rules.register_function(proto_library)
 
 def protoc_import_path_option(incs):
     return ' '.join(['-I=%s' % inc for inc in incs])
+
+
+def _protobuf_include_dir(toolchain, build_dir, proto_config):
+    """The protobuf include root that ships the well-known `.proto` files.
+
+    For a ``vcpkg#<port>`` protoc it is that port's installed ``include/`` (the
+    same install `_resolve_protoc` finds the binary in); otherwise the first
+    configured ``protobuf_incs`` entry. '' when neither is available."""
+    protoc = proto_config['protoc']
+    if protoc.startswith('vcpkg#'):
+        from blade import vcpkg  # local import: avoid a config<->vcpkg cycle
+        vcpkg_cfg = config.get_section('vcpkg_config')
+        vanilla = vcpkg.triplet_for_toolchain(toolchain)
+        root, triplet = vcpkg.install_location(vcpkg_cfg, vanilla, build_dir)
+        return os.path.join(root or '', 'installed', triplet or '', 'include')
+    incs = proto_config['protobuf_incs']
+    return incs[0] if incs else ''
+
+
+# Last-resort fallback when neither an explicit list nor a discoverable include
+# tree is available (e.g. a misconfigured protobuf provider). These are the
+# well-known types protobuf has shipped for many major versions, so the common
+# `import "google/protobuf/*.proto"` keeps resolving under --direct_dependencies
+# instead of failing outright. Discovery (when it works) supersedes this and
+# tracks the actual protobuf version; this is only a safety net.
+_DEFAULT_WELL_KNOWN_PROTOS = (
+    'google/protobuf/any.proto',
+    'google/protobuf/api.proto',
+    'google/protobuf/compiler/plugin.proto',
+    'google/protobuf/descriptor.proto',
+    'google/protobuf/duration.proto',
+    'google/protobuf/empty.proto',
+    'google/protobuf/field_mask.proto',
+    'google/protobuf/source_context.proto',
+    'google/protobuf/struct.proto',
+    'google/protobuf/timestamp.proto',
+    'google/protobuf/type.proto',
+    'google/protobuf/wrappers.proto',
+)
+
+_well_known_protos_cache = {}
+
+
+def well_known_protos(toolchain, build_dir, proto_config):
+    """The well-known protos to whitelist in protoc's --direct_dependencies.
+
+    An explicit ``proto_library_config.well_known_protos`` wins. Otherwise
+    discover them from the protobuf include tree (issue #1339): every
+    ``google/protobuf/**/*.proto`` protobuf ships, as include-root-relative
+    paths (e.g. ``google/protobuf/any.proto``) -- so the list is not
+    hand-maintained per workspace and tracks the protobuf version in use.
+    Falls back to ``_DEFAULT_WELL_KNOWN_PROTOS`` when no include tree is
+    resolvable, so a misconfigured provider still resolves the common WKT
+    imports rather than failing outright."""
+    explicit = proto_config['well_known_protos']
+    if explicit:
+        return list(explicit)
+    inc = _protobuf_include_dir(toolchain, build_dir, proto_config)
+    if inc in _well_known_protos_cache:
+        return _well_known_protos_cache[inc]
+    discovered = []
+    base = os.path.join(inc, 'google', 'protobuf') if inc else ''
+    if base and os.path.isdir(base):
+        discovered = sorted(
+            to_unix_path(os.path.relpath(p, inc))
+            for p in glob.glob(os.path.join(base, '**', '*.proto'), recursive=True))
+    result = discovered or list(_DEFAULT_WELL_KNOWN_PROTOS)
+    _well_known_protos_cache[inc] = result
+    return result
 
 
 def _resolve_protoc(toolchain, build_dir, protoc):
