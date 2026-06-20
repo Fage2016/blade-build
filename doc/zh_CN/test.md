@@ -141,7 +141,9 @@ java_test_config(
 - 覆盖率报告会生成到构建目录下的 `jacoco_coverage_report` 目录
 - 若需要行级覆盖率，`global_config.debug_info_level` 需设置为 `mid` 或更高（要求编译时带 `-g:line` 选项）
 
-## Sanitizer（消毒器）
+## Sanitizer
+
+Sanitizer 是基于编译器的**运行时**缺陷检测工具，由 Google 在 LLVM/Clang 中首创（AddressSanitizer，2012 年），随后被 GCC 采纳。它在编译期对代码插桩，在程序运行时捕获那些通常无声无息、难以复现的缺陷：越界访问与释放后使用（ASan）、读取未初始化内存（MSan）、未定义行为（UBSan）、数据竞争（TSan）以及内存泄漏（LSan）。你得到的不再是飘忽不定、依赖运气才能复现的 bug，而是在出错点当场给出的符号化报告。各工具链支持程度不同——Clang 支持全部；GCC 除 MSan 外都支持；MSVC 仅支持 ASan。
 
 只需一个命令行开关，即可让现有目标树在 sanitizer 下构建并运行，无需改动 BUILD 文件：
 
@@ -150,13 +152,15 @@ blade test //...                                # 普通
 blade test //... --sanitizer=address            # AddressSanitizer（别名：asan）
 blade test //... --sanitizer=undefined          # UndefinedBehaviorSanitizer（别名：ubsan）
 blade test //... --sanitizer=thread             # ThreadSanitizer（别名：tsan）
+blade test //... --sanitizer=memory             # MemorySanitizer（别名：msan，仅 Clang + Linux）
 blade test //... --sanitizer=address,undefined  # 组合（ASan + UBSan）
 ```
 
-sanitizer 是**每次运行的选择**（命令行开关），不是项目配置。`--sanitizer` 对 `build`/`run`/`test` 均生效，取值是逗号分隔的**集合**：`address`（`asan`）、`undefined`（`ubsan`）、`leak`（`lsan`）、`thread`（`tsan`）——在 gcc / clang / Apple clang 上支持（MemorySanitizer 后续支持）。集合会被规范化（去重并排序），因此 `--sanitizer=ubsan,address` 与 `--sanitizer=address,undefined` 是同一个构建。运行时不同的 sanitizer 不能组合——`address`/`leak`/`undefined` 可以共存，但 `thread` 与 `address`/`leak` 互斥（非法组合会在启动时明确报错）。
+sanitizer 是**每次运行的选择**（命令行开关），不是项目配置。`--sanitizer` 对 `build`/`run`/`test` 均生效，取值是逗号分隔的**集合**：`address`（`asan`）、`undefined`（`ubsan`）、`leak`（`lsan`）、`thread`（`tsan`）、`memory`（`msan`）——在 gcc / clang / Apple clang 上支持（MSan 仅限 Clang + Linux，见下文）。集合会被规范化（去重并排序），因此 `--sanitizer=ubsan,address` 与 `--sanitizer=address,undefined` 是同一个构建。运行时不同的 sanitizer 不能组合——`address`/`leak`/`undefined` 可以共存，但 `thread` 与 `memory` 各自与 `address`/`leak` 以及彼此互斥（两者仍可与 `undefined` 共存）。非法组合会在启动时明确报错。
 
 - **编译选项：** 给编译和链接都加上 `-fsanitize=<集合> -fno-omit-frame-pointer -g`（链接以引入 sanitizer 运行时）。UBSan 被设为**致命**（`-fno-sanitize-recover=undefined`），使其发现问题时让测试失败，而非仅打印。对测试，Blade 还会设置合理的 `*_OPTIONS` 默认值（如 `TSAN_OPTIONS=halt_on_error=1`），使检测能可靠地以非零退出——你在环境变量中已设置的值仍然优先。因此 `blade test` 会把检测判为失败。
 - **MSVC：** MSVC 工具链**仅**支持 AddressSanitizer——`--sanitizer=address` 用 `/fsanitize=address` 编译（并加 `/Z7` 以便符号化报告），以非增量方式链接（`/INCREMENTAL:NO /DEBUG`；ASan 运行时由编译器自动引入），并把 ASan 运行时 DLL 加入测试的 `PATH`。在 MSVC 上请求其它 sanitizer 会在启动时明确报错。
+- **MemorySanitizer：** `--sanitizer=memory`（别名 `msan`）检测对未初始化内存的读取。它**仅限 Clang + Linux**——GCC 没有 MSan，运行时在 macOS 上也不可用，在其它环境请求会在启动时明确报错。Blade 会加上 `-fsanitize-memory-track-origins=2`，使报告能回溯到未初始化值的来源。MSan 只有在**所有**参与链接的代码都被插桩时才不会误报：你需要自行构建（或提供）一个经 MSan 插桩的 C++ 标准库，并让依赖项也在 MSan 下构建——否则未插桩的系统库会带来大量误报。
 - **独立的构建目录：** sanitizer 构建与普通构建在 ABI/代码生成上不兼容，因此使用带 sanitizer 标记的独立兄弟目录——`build64_release_asan`。普通的 `build64_release` 不受影响，两者可并存、互不覆盖、互不触发重新编译。
 - **按目标退出：** 不应被插桩的目标（有意的 UB、性能热点、对未插桩预编译库的包装）可设置 `sanitize = False`。它仍参与链接（仍获得运行时），只是自身的编译不再插桩。在 MSVC 上同样有效——由于 `cl` 没有 `-fno-sanitize`，Blade 改为将该目标的 `/fsanitize` 标志置空。
 
