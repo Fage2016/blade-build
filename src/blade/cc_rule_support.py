@@ -261,6 +261,139 @@ def _warn_coverage_unsupported():
         'coverage, or OpenCppCoverage (PDB-based, no rebuild).')
 
 
+# --- PGO (profile-guided optimization) ---------------------------------------
+#
+# PGO is invocation-driven (a global build mode), per the design in #1366:
+# `--profile-generate` instruments, the user runs a representative workload,
+# then `--profile-use` rebuilds with the collected profile. gcc and clang share
+# the `-fprofile-*` spelling but diverge in the use phase:
+#   * gcc reads the `.gcda` files directly and wants `-fprofile-correction`
+#     to tolerate the count skew a multithreaded program produces.
+#   * clang REJECTS `-fprofile-correction`; its instrumented run emits
+#     `.profraw`, which must be `llvm-profdata merge`'d into a `.profdata` that
+#     `-fprofile-use=` then points at (a file, not a directory).
+# Native MSVC is a different flag family (/GL + /LTCG:PG*) and is implemented in
+# the Windows compile/lib/link rules below (see the `_pgo_msvc_*` helpers); the
+# gcc/clang `-fprofile-*` path here never runs for MSVC.
+
+
+def _pgo_option(options, name):
+    """Value of a PGO option ('' = enabled with no path), or None if absent."""
+    return getattr(options, name, None) if hasattr(options, name) else None
+
+
+def _find_llvm_profdata(toolchain):
+    """Locate ``llvm-profdata`` for a clang toolchain: next to the compiler,
+    then PATH, then ``xcrun`` on macOS. Returns a command list or ``None``."""
+    import shutil
+    cc = getattr(toolchain, 'cc', '') or ''
+    bindir = os.path.dirname(cc)
+    if bindir:
+        cand = os.path.join(bindir, 'llvm-profdata')
+        if os.path.isfile(cand):
+            return [cand]
+    found = shutil.which('llvm-profdata')
+    if found:
+        return [found]
+    if toolchain.target_os == 'darwin' and shutil.which('xcrun'):
+        rc, out, _ = util.run_command(['xcrun', '--find', 'llvm-profdata'])
+        if rc == 0 and out.strip():
+            return [out.strip()]
+    return None
+
+
+# Merge runs at most once per build (the flag computation is invoked several
+# times); cache the resolved profdata path keyed by the source path.
+_clang_profdata_cache = {}
+
+
+def _resolve_clang_profdata(toolchain, path):
+    """Return a ``.profdata`` path for clang ``-fprofile-use=``.
+
+    - empty -> ``None`` (bare ``-fprofile-use``; clang reads ``default.profdata``)
+    - a ``.profdata`` file -> used as-is
+    - a directory (or raw ``.profraw``) -> merged once via ``llvm-profdata
+      merge`` into ``<dir>/blade-merged.profdata``.
+    On any failure, warn once and fall back to the original path so the build
+    surfaces a clear error rather than silently dropping PGO.
+    """
+    if not path:
+        return None
+    if os.path.isfile(path) and path.endswith('.profdata'):
+        return path
+    if path in _clang_profdata_cache:
+        return _clang_profdata_cache[path]
+
+    import glob
+    if os.path.isdir(path):
+        raws = glob.glob(os.path.join(path, '**', '*.profraw'), recursive=True)
+        out_dir = path
+    else:  # a glob/raw path
+        raws = glob.glob(path)
+        out_dir = os.path.dirname(path) or '.'
+    profdata = os.path.join(out_dir, 'blade-merged.profdata')
+
+    tool = _find_llvm_profdata(toolchain)
+    if not tool or not raws:
+        console.warning(
+            'PGO profile-use: clang needs a merged .profdata but could not '
+            'produce one from "%s" (llvm-profdata %s, %d .profraw found). Pass '
+            'an already-merged .profdata to --profile-use, or run: '
+            'llvm-profdata merge -o out.profdata %s/*.profraw' % (
+                path, 'not found' if not tool else 'found', len(raws), path))
+        _clang_profdata_cache[path] = path
+        return path
+
+    rc, _, err = util.run_command(tool + ['merge', '-output=' + profdata] + raws)
+    if rc != 0:
+        console.warning('PGO profile-use: llvm-profdata merge failed: %s' % err)
+        _clang_profdata_cache[path] = path
+        return path
+    console.info('PGO: merged %d .profraw into %s' % (len(raws), profdata))
+    _clang_profdata_cache[path] = profdata
+    return profdata
+
+
+# --- MSVC PGO (#1366 Phase 2) ------------------------------------------------
+#
+# MSVC PGO is a different flag family from gcc/clang's `-fprofile-*`: it is
+# whole-program (LTCG) instrumentation. Verified end to end on VS:
+#   instrument: compile `/GL`, link `/LTCG /GENPROFILE` -> binary + `<name>.pgd`
+#   run:        the binary writes `<name>!N.pgc` next to the `.pgd`
+#   optimize:   link `/LTCG /USEPROFILE` -- auto-merges the `.pgc` into the
+#               `.pgd` and rebuilds optimized (no separate `pgomgr` step)
+# The `.pgd` is keyed to the output name, so the instrument and optimize builds
+# share one `build_*_pgo` dir (the same dir gcc needs for `.gcda` lookup).
+
+def _pgo_msvc_active(options):
+    return (_pgo_option(options, 'profile-generate') is not None
+            or _pgo_option(options, 'profile-use') is not None)
+
+
+def _pgo_msvc_compile_flags(options):
+    """MSVC compile flags for an active PGO mode: `/GL` (whole-program info LTCG
+    PGO needs; same flag for the instrument and the optimize build) plus the
+    PROFILE_GUIDED_OPTIMIZATION define, for parity with the gcc/clang path."""
+    if _pgo_msvc_active(options):
+        return ['/GL', '/DPROFILE_GUIDED_OPTIMIZATION']
+    return []
+
+
+def _pgo_msvc_lib_flags(options):
+    """`lib.exe` needs `/LTCG` to archive the `/GL` objects a PGO build emits."""
+    return ['/LTCG'] if _pgo_msvc_active(options) else []
+
+
+def _pgo_msvc_link_flags(options):
+    """MSVC PGO link flags: `/LTCG /GENPROFILE` to instrument, `/LTCG /USEPROFILE`
+    to optimize (the latter auto-merges the run's `.pgc` into the `.pgd`)."""
+    if _pgo_option(options, 'profile-generate') is not None:
+        return ['/LTCG', '/GENPROFILE']
+    if _pgo_option(options, 'profile-use') is not None:
+        return ['/LTCG', '/USEPROFILE']
+    return []
+
+
 class CcRuleGenerator:
     """Generate cc/cuda ninja rules from a RuleContext (see module docstring)."""
 
@@ -399,25 +532,37 @@ class CcRuleGenerator:
             # Only the link flags (which pull in the runtime) stay global.
             linkflags += sanitizer.link_flags(sanitizers)
 
-        if hasattr(self.options, 'profile-generate') and getattr(self.options, 'profile-generate') is not None:
-            pgo_gen_dir = getattr(self.options, 'profile-generate')
-            if not pgo_gen_dir:
-                cppflags.append('-fprofile-generate')
-                linkflags.append('-fprofile-generate')
-            else:
-                cppflags.append('-fprofile-generate=' + pgo_gen_dir)
-                linkflags.append('-fprofile-generate=' + pgo_gen_dir)
+        # PGO -- see the module-level "PGO" note. This is the gcc/clang path
+        # (MSVC uses /GL + /LTCG:PG* in the Windows rules and never gets here).
+        pgo_gen = _pgo_option(self.options, 'profile-generate')
+        if pgo_gen is not None:
+            # gcc and clang share this spelling. The runtime (libgcov /
+            # clang's profile runtime) is pulled in at link, so the flag
+            # rides both cppflags and linkflags.
+            flag = '-fprofile-generate' + ('=' + pgo_gen if pgo_gen else '')
+            cppflags.append(flag)
+            linkflags.append(flag)
             cppflags.append('-DPROFILE_GUIDED_OPTIMIZATION')
 
-        if hasattr(self.options, 'profile-use') and getattr(self.options, 'profile-use') is not None:
-            pgo_use_dir = getattr(self.options, 'profile-use')
-            if not pgo_use_dir:
-                cppflags.append('-fprofile-use')
-            else:
-                cppflags.append('-fprofile-use=' + pgo_use_dir)
-            cppflags.append('-fprofile-correction')
-            cppflags.append('-Wno-error=coverage-mismatch')
-            cppflags.append('-DPROFILE_GUIDED_OPTIMIZATION')
+        pgo_use = _pgo_option(self.options, 'profile-use')
+        if pgo_use is not None:
+            if self.build_toolchain.cc_is('clang'):
+                # clang rejects -fprofile-correction and needs a *merged*
+                # .profdata file (blade merges the .profraw for you).
+                profdata = _resolve_clang_profdata(self.build_toolchain, pgo_use)
+                cppflags.append('-fprofile-use=' + profdata if profdata
+                                else '-fprofile-use')
+                # Tolerate stale/partial profiles as warnings, not errors --
+                # the clang analogues of gcc's -Wno-error=coverage-mismatch.
+                cppflags.append('-Wno-error=profile-instr-out-of-date')
+                cppflags.append('-Wno-error=profile-instr-unprofiled')
+                cppflags.append('-DPROFILE_GUIDED_OPTIMIZATION')
+            else:  # gcc
+                cppflags.append('-fprofile-use=' + pgo_use if pgo_use
+                                else '-fprofile-use')
+                cppflags.append('-fprofile-correction')
+                cppflags.append('-Wno-error=coverage-mismatch')
+                cppflags.append('-DPROFILE_GUIDED_OPTIMIZATION')
 
         # Recover -fPIE-level optimization under -fPIC: tell the compiler the
         # current TU's symbol definitions aren't interposable, so it can
@@ -562,6 +707,10 @@ class CcRuleGenerator:
         global_config = config.get_section('global_config')
         cppflags = cppflags + windows_config['debug_info_levels'][global_config['debug_info_level']]
 
+        # PGO (#1366): `/GL` on every compile when a profile mode is active, so
+        # the link can do LTCG instrumentation / optimization.
+        cppflags = cppflags + _pgo_msvc_compile_flags(self.options)
+
         # The Python stderr-tee wrapper captures /showIncludes output and tees
         # it to both stderr (for Ninja's deps=msvc) and the inclusion stack
         # file (for inclusion checking).
@@ -628,8 +777,11 @@ class CcRuleGenerator:
                             'does not support thin archives)')
         ar = self.build_accelerator.get_ar_command()
         brepro = ' /Brepro' if deterministic else ''
+        # PGO (#1366): lib.exe needs /LTCG to archive the /GL objects a PGO
+        # build emits.
+        pgo = ''.join(' ' + f for f in _pgo_msvc_lib_flags(self.options))
         self.generate_rule(name='ar',
-                           command=f'{ar} /nologo{brepro} /out:${{out}} ${{in}}',
+                           command=f'{ar} /nologo{brepro}{pgo} /out:${{out}} ${{in}}',
                            description='LIB ${out}')
 
     def _generate_windows_link_rules(self):
@@ -657,6 +809,16 @@ class CcRuleGenerator:
         sanitizers = getattr(self.options, 'sanitizers', None)
         if sanitizers:
             for flag in sanitizer.msvc_link_flags(sanitizers):
+                if flag not in linkflags:
+                    linkflags = linkflags + [flag]
+
+        # PGO (#1366): LTCG instrument (/GENPROFILE) or optimize (/USEPROFILE).
+        # LTCG is incompatible with incremental linking, so force it off (a
+        # release build already did). The .pgd is auto-named from /out, so each
+        # binary gets its own profile in the shared build_*_pgo dir.
+        pgo_link = _pgo_msvc_link_flags(self.options)
+        if pgo_link:
+            for flag in pgo_link + ['/INCREMENTAL:NO']:
                 if flag not in linkflags:
                     linkflags = linkflags + [flag]
 
