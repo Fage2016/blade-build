@@ -154,6 +154,46 @@ Toolchain differences blade handles for you:
 
 Blade owns the build flags and the clang merge step; producing a *representative* workload (and deciding when a profile is stale) is your job. Profiles are **not** portable across compilers — instrument, run, and optimize all on one toolchain.
 
+> The **instrument** build defines `BLADE_PGO_GENERATE` (a Blade-private macro, not a compiler/industry standard), so source can flush the profile runtime in long-running or forking servers — e.g. `#ifdef BLADE_PGO_GENERATE` → `__llvm_profile_write_file()` (clang) / `__gcov_dump()` (gcc) / `PgoAutoSweep(...)` (MSVC). The **use** build and **AutoFDO** define nothing: those binaries should behave exactly like a normal release.
+
+### Sample-based PGO (AutoFDO)
+
+The instrumentation-based PGO above needs two builds — instrument, then optimize — which is cumbersome, and the instrumented run carries real overhead.
+
+AutoFDO is the **no-instrumentation** flavor of PGO: instead of an instrumented build, you sample a *normal optimized* binary and rebuild with the result. The collection runs at ~1% overhead (vs ~2× for instrumentation), so the profile can come from real production traffic. Works on **gcc/clang** (sample with `perf`) and **native MSVC** (sample with `xperf` — see SPGO below). Uses a dedicated `build_*_autofdo` dir.
+
+```bash
+# Phase 1 — build with AutoFDO-friendly debug info, then sample under perf
+blade build //foo:server --autofdo-generate
+perf record -b -- ./build_release_autofdo/foo/server     # -b = LBR branch records
+
+# Convert perf.data -> a sample profile yourself (it needs the collected binary):
+#   clang: llvm-profgen --perfdata=perf.data --binary=build_release_autofdo/foo/server --output=foo.prof
+#   gcc:   create_gcov  --binary=build_release_autofdo/foo/server --profile=perf.data --gcov=foo.afdo
+
+# Phase 2 — rebuild using the converted profile
+blade build //foo:server --autofdo-use=foo.prof
+```
+
+**Typical usage — one build per release (steady state).** Unlike instrumentation PGO (which always needs a separate *slow instrumented* build), AutoFDO's collection binary is a *normal* binary, so once you have a profile you combine both phases into **a single build that is both optimized and collectable**:
+
+```bash
+# Each release: optimize with last cycle's profile AND stay sample-able for the next.
+blade build //foo:server --autofdo-generate --autofdo-use=foo.prof
+# ship it -> sample it in production -> convert -> feeds the *next* release's --autofdo-use
+```
+
+`--autofdo-generate` + `--autofdo-use` compose on all three toolchains (gcc/clang add the debug info alongside `-fprofile-sample-use`/`-fauto-profile`; MSVC links `/spgo` alongside `/spdin:` — verified legal on MSVC 14.51, x64 + ARM64). So in steady state every build is simultaneously "optimize with last profile" and "collect for next" — no dedicated extra build. (The very first time, run `--autofdo-generate` alone to bootstrap a profile.) The AutoFDO debug flags are cheap, so you can also bake them into your release config and pass just `--autofdo-use` daily.
+
+- **clang** → `-fprofile-sample-use=<profile>`; the collection build adds `-fdebug-info-for-profiling` + `-funique-internal-linkage-names` (better sample-to-source mapping).
+- **gcc** → `-fauto-profile=<profile>`; the collection build needs only the `-g` Blade already emits (the clang debug flags are clang-only).
+- **`--autofdo-use` takes an *already-converted* profile**, not a raw `perf.data` — the converter (`llvm-profgen`/`create_gcov`) needs the collected binary, which Blade doesn't have at build time. A raw `perf.data` is detected and rejected with the conversion command.
+- **native MSVC** uses its own sample-PGO — **SPGO** ([Sample Profile Guided Optimization](https://devblogs.microsoft.com/cppblog/introducing-sample-profile-guided-optimization-in-msvc/), VS 2022 / 2026 with MSVC 14.51+), which Blade drives from the same `--autofdo-*` flags: `--autofdo-generate` links `/spgo` (collect build), `--autofdo-use=app.spd` links `/LTCG /spdin:app.spd` (both compile `/GL`). You sample with **`xperf`** (IP sampling on any CPU, LBR on Intel Haswell+/AMD Zen 4+/ARM64 ARMv9.2-A+) and convert with **`SPDConvert`** into the `.spd` — those are your step, as with perf. **clang-cl** can't do sample-PGO on Windows (SPGO is cl-only; AutoFDO needs `perf`), so `--autofdo-*` is skipped there with a warning.
+
+**Platform availability (collection vs use).** Sample-PGO *collection* needs hardware sampling: gcc/clang need `perf` + **LBR** (a **bare-metal / PMU-passthrough x86_64 Linux** host — ARM Linux VMs typically expose no PMU/LBR, so `perf record -b` fails there); native MSVC needs `xperf` (IP sampling works on any CPU, including ARM64). **macOS has no sample-PGO collection path at all** (no `perf`, no SPGO; Instruments/`sample`/`dtrace` don't feed `llvm-profgen`) — the `--autofdo-use` flag is still portable, so a Linux-collected profile *can* be applied there, but cross-OS/arch reuse is imperfect and unsupported. Where you can't collect, **use instrumentation PGO** (`--profile-generate`/`--profile-use`) — fully functional everywhere with no special hardware.
+
+> **References:** [GCC AutoFDO tutorial](https://gcc.gnu.org/wiki/AutoFDO/Tutorial) · [MSVC SPGO](https://devblogs.microsoft.com/cppblog/introducing-sample-profile-guided-optimization-in-msvc/)
+
 ## Usage Examples
 
 ```bash
