@@ -350,6 +350,22 @@ class CommandLineParser:
                  'MSVC -> /spdin: (xperf + SPDConvert .spd). Conversion is yours '
                  '(it needs the collected binary). Same build_*_autofdo dir.')
 
+    def __add_lto_arguments(self, parser):
+        """Add Link-Time Optimization arguments (#1378).
+
+        LTO is normally a project policy (`cc_config(lto='thin')`); this flag
+        overrides it per invocation and is honored even in debug (escape hatch).
+        gcc/clang only in v1.
+        """
+        parser.add_argument(
+            '--lto', dest='lto', metavar='MODE',
+            action='store', type=str, nargs='?', const='thin',
+            choices=['thin', 'full', 'no'],
+            help='Link-time optimization for this build, overriding '
+                 'cc_config.lto. Bare --lto = thin (ThinLTO); --lto=full = '
+                 'monolithic; --lto=no = off. Honored even in debug. '
+                 'gcc/clang only.')
+
     def __add_fission_arguments(self, parser):
         """Add fission support to cc_binary."""
         parser.add_argument(
@@ -447,6 +463,7 @@ class CommandLineParser:
             self.__add_coverage_arguments(parser)
             self.__add_sanitizer_arguments(parser)
             self.__add_pgo_arguments(parser)
+            self.__add_lto_arguments(parser)
             self.__add_fission_arguments(parser)
 
     def _add_common_arguments(self, *parsers):
